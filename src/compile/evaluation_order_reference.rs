@@ -339,7 +339,9 @@ fn collect_scalar_dependencies(
             collect_scalar_dependencies(left, dependencies, relation_dependencies);
             collect_scalar_dependencies(right, dependencies, relation_dependencies);
         }
-        ScalarExprSpec::Ceil { value } | ScalarExprSpec::Floor { value } => {
+        ScalarExprSpec::Ceil { value }
+        | ScalarExprSpec::Floor { value }
+        | ScalarExprSpec::CalendarYearsToMonths { years: value } => {
             collect_scalar_dependencies(value, dependencies, relation_dependencies);
         }
         ScalarExprSpec::PeriodStart | ScalarExprSpec::PeriodEnd => {}

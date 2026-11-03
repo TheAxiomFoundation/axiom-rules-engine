@@ -176,7 +176,7 @@ For a build whose commit is unknown, the response has this shape:
 ```json
 {
   "artifact_format_version": 3,
-  "capabilities": ["relation_entity_typing", "related_min_max_only", "artifact_interface", "relation_roles"],
+  "capabilities": ["relation_entity_typing", "related_min_max_only", "artifact_interface", "relation_roles", "lifetime_calculation"],
   "engine_version": "0.2.2",
   "engine_build": { "commit": null, "dirty": null },
   "legacy_artifact_formats": [2]
@@ -202,6 +202,12 @@ refuses a reachable qualified read, atom, term comparison, `exists` or path
 source by name and names #218. Parameter reads in predicates also compile in
 dense. See the [relation-role design](docs/relation-roles.md) and
 [execution semantics](docs/execution-semantics.md).
+An engine listing `lifetime_calculation` reads the
+`calendar_years_to_months` expression node, accepts a `sum_top_n_over_periods`
+count that itself reduces over periods, and runs `run-lifetime` with
+`lifetime-request/v1` and `/v2` (law fixed at a calculation period). An engine
+without it refuses an artifact carrying the node on load. See the
+[lifetime CLI](docs/lifetime-cli.md).
 
 `request.json` must key atomic inputs by one of the exact owners published in
 `metadata.input_catalog`. Synthesized composition inputs use the catalog's bare

@@ -61,6 +61,7 @@ fn capabilities_report_the_artifact_format_version() {
         "relation_entity_typing",
         "related_min_max_only",
         "relation_roles",
+        "lifetime_calculation",
     ] {
         assert!(
             capabilities.iter().any(|listed| listed == capability),

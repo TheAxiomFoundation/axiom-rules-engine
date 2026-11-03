@@ -1508,7 +1508,10 @@ impl EvidenceCollector<'_> {
             ),
             ScalarExpr::ParameterLookup { index, .. }
             | ScalarExpr::Ceil(index)
-            | ScalarExpr::Floor(index) => self.scalar(index, entity, slots),
+            | ScalarExpr::Floor(index)
+            | ScalarExpr::CalendarYearsToMonths { years: index } => {
+                self.scalar(index, entity, slots)
+            }
             ScalarExpr::Add(items) | ScalarExpr::Max(items) | ScalarExpr::Min(items) => {
                 for item in items {
                     self.scalar(item, entity, slots);

@@ -2215,6 +2215,12 @@ fn collect_fast_blockers_from_scalar_expr(
         ScalarExprSpec::Ceil { value } | ScalarExprSpec::Floor { value } => {
             collect_fast_blockers_from_scalar_expr(derived_name, rules, value, blockers);
         }
+        ScalarExprSpec::CalendarYearsToMonths { years } => {
+            blockers.push(format!(
+                "{derived_name}: bulk fast mode does not yet support calendar_years_to_months; explain mode and the generic dense path do"
+            ));
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, years, blockers);
+        }
         ScalarExprSpec::PeriodStart | ScalarExprSpec::PeriodEnd => {
             blockers.push(format!(
                 "{derived_name}: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do"
@@ -2514,7 +2520,9 @@ fn collect_scalar_dependencies(
             collect_scalar_dependencies(left, dependencies, aggregated_relations);
             collect_scalar_dependencies(right, dependencies, aggregated_relations);
         }
-        ScalarExprSpec::Ceil { value } | ScalarExprSpec::Floor { value } => {
+        ScalarExprSpec::Ceil { value }
+        | ScalarExprSpec::Floor { value }
+        | ScalarExprSpec::CalendarYearsToMonths { years: value } => {
             collect_scalar_dependencies(value, dependencies, aggregated_relations);
         }
         ScalarExprSpec::PeriodStart | ScalarExprSpec::PeriodEnd => {}
@@ -2637,7 +2645,8 @@ fn collect_relation_members_from_scalar(
         | ScalarExprSpec::PeriodEnd => {}
         ScalarExprSpec::ParameterLookup { index, .. }
         | ScalarExprSpec::Ceil { value: index }
-        | ScalarExprSpec::Floor { value: index } => {
+        | ScalarExprSpec::Floor { value: index }
+        | ScalarExprSpec::CalendarYearsToMonths { years: index } => {
             has_atom |= collect_relation_members_from_scalar(index, relations);
         }
         ScalarExprSpec::Add { items }

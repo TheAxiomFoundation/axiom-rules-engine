@@ -366,7 +366,13 @@ the same laziness: a reduction, a period-invariant input check and a top-N
 count see only the rows that reach them, and a row stops at its first failing
 period. Inside a reduction, each reached rule's commencement is checked against
 that reduction period's start. The `n` argument of `sum_top_n_over_periods` is
-also evaluated and checked in every period before its invariance check. In the
+also evaluated and checked in every period before its invariance check, unless
+`n` itself reduces over periods (a per-person count of qualifying periods, for
+example). Such an `n` has no per-period value, so it is evaluated once in the
+lifetime context with caches of its own: values inside its reductions keep each
+period, a bare input outside them must be period-invariant as for any lifetime
+value, and a parameter lookup outside them is made in every period and must
+agree, failing the row with `OverPeriodsTopNPeriodVarying` otherwise. In the
 lifetime context, requested outputs and derived rules referenced outside a
 reduction are checked against the reference period's start: the chronologically
 last supplied period. A row that reaches a
@@ -375,6 +381,15 @@ the rule and the applicable period start, just as per-period dense and explain
 do for that period. Untaken branches do not fail. Lifetime uses the same dense
 compiler as per-period execution: derived rules with an `effective_to` bound or
 multiple formula versions are refused with `DenseCompileError::Unsupported`.
+
+A calculation lifetime plan (`dense::CalculationLifetimePlan`, behind the
+`lifetime-request/v2` CLI request) fixes law at one calculation period
+instead. Every rule and parameter it reaches uses the version in force at the
+calculation period's start, whatever its version count, and commencement is
+checked against that date. Inputs, `period_start` and `period_end` keep each
+observation's period. The plan refuses relations, Float input columns and
+observations that do not end before the calculation starts; see
+[the lifetime CLI](lifetime-cli.md).
 
 In an output that reduces over periods, a relation aggregation outside
 the reduction has no period to read and fails with `LifetimeAmbiguousLeaf`,

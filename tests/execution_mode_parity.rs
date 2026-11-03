@@ -2332,9 +2332,9 @@ fn walk_scalar(expr: &ScalarExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
             walk_scalar(left, visit);
             walk_scalar(right, visit);
         }
-        ScalarExprSpec::Ceil { value } | ScalarExprSpec::Floor { value } => {
-            walk_scalar(value, visit)
-        }
+        ScalarExprSpec::Ceil { value }
+        | ScalarExprSpec::Floor { value }
+        | ScalarExprSpec::CalendarYearsToMonths { years: value } => walk_scalar(value, visit),
         ScalarExprSpec::NoMatch { subject, patterns } => {
             walk_scalar(subject, visit);
             for pattern in patterns {
@@ -4345,9 +4345,9 @@ fn retired_sums_in_scalar(expr: &ScalarExprSpec) -> usize {
         | ScalarExprSpec::Div { left, right } => {
             retired_sums_in_scalar(left) + retired_sums_in_scalar(right)
         }
-        ScalarExprSpec::Ceil { value } | ScalarExprSpec::Floor { value } => {
-            retired_sums_in_scalar(value)
-        }
+        ScalarExprSpec::Ceil { value }
+        | ScalarExprSpec::Floor { value }
+        | ScalarExprSpec::CalendarYearsToMonths { years: value } => retired_sums_in_scalar(value),
         ScalarExprSpec::DateAddDays { date, days: other }
         | ScalarExprSpec::DateAddMonths {
             date,

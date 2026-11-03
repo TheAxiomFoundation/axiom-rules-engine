@@ -9,6 +9,7 @@ use std::sync::Arc;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::compile::CompiledProgramArtifact;
@@ -446,6 +447,14 @@ pub struct DenseExecutionResult {
 #[derive(Debug, Error)]
 pub enum DenseCompileError {
     #[error(transparent)]
+    Artifact(#[from] crate::compile::CompileError),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error("invalid calculation history: {0}")]
+    CalculationHistory(String),
+    #[error("no active parameter version for `{parameter}` at calculation date {at}")]
+    MissingParameterVersion { parameter: String, at: NaiveDate },
+    #[error(transparent)]
     Eval(#[from] EvalError),
     #[error("relation entity typing failed:\n{0}")]
     RelationTyping(crate::relation_typing::RelationTypingReport),
@@ -530,6 +539,9 @@ enum CompiledScalarExpr {
     Min(Vec<CompiledScalarExpr>),
     Ceil(Box<CompiledScalarExpr>),
     Floor(Box<CompiledScalarExpr>),
+    CalendarYearsToMonths {
+        years: Box<CompiledScalarExpr>,
+    },
     PeriodStart,
     PeriodEnd,
     DateAddDays {
@@ -647,6 +659,9 @@ enum CompiledRelatedScalarExpr {
     Min(Vec<CompiledRelatedScalarExpr>),
     Ceil(Box<CompiledRelatedScalarExpr>),
     Floor(Box<CompiledRelatedScalarExpr>),
+    CalendarYearsToMonths {
+        years: Box<CompiledRelatedScalarExpr>,
+    },
     PeriodStart,
     PeriodEnd,
     DateAddDays {
@@ -925,8 +940,143 @@ impl CompiledParameter {
     }
 }
 
+/// Exact original version selected while preparing a fixed-law lifetime plan.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SelectedVersion {
+    UnversionedDerived {
+        name: String,
+        id: Option<String>,
+    },
+    Derived {
+        name: String,
+        id: Option<String>,
+        version_index: usize,
+        effective_from: NaiveDate,
+        effective_to: Option<NaiveDate>,
+    },
+    Parameter {
+        name: String,
+        id: Option<String>,
+        version_index: usize,
+        effective_from: NaiveDate,
+        effective_to: Option<NaiveDate>,
+    },
+}
+
+/// Immutable fixed-law preparation. Historical inputs keep their observation
+/// dates; this plan exposes no scalar, f64, or legacy-lifetime execution method.
+#[derive(Clone, Debug)]
+pub struct CalculationLifetimePlan {
+    compiled: DenseCompiledProgram,
+    calculation_period: Period,
+}
+
+impl CalculationLifetimePlan {
+    pub fn from_artifact(
+        artifact: &CompiledProgramArtifact,
+        entity: &str,
+        calculation_period: Period,
+    ) -> Result<Self, DenseCompileError> {
+        // Public callers can construct artifact structs: re-admit their contract.
+        let artifact = CompiledProgramArtifact::from_json_str(&serde_json::to_string(artifact)?)?;
+        Self::from_program(&artifact.program.to_program()?, entity, calculation_period)
+    }
+
+    pub(crate) fn from_program(
+        program: &Program,
+        entity: &str,
+        calculation_period: Period,
+    ) -> Result<Self, DenseCompileError> {
+        validate_calculation_period(&calculation_period)?;
+        let compiled =
+            DenseCompiledProgram::prepare(program, Some(entity), Some(calculation_period.clone()))?;
+        if !compiled.relations.is_empty() {
+            return Err(DenseCompileError::Unsupported(
+                "relation context in calculation lifetime execution".into(),
+            ));
+        }
+        Ok(Self {
+            compiled,
+            calculation_period,
+        })
+    }
+
+    pub fn calculation_period(&self) -> &Period {
+        &self.calculation_period
+    }
+    pub fn selected_versions(&self) -> &[SelectedVersion] {
+        &self.compiled.selected_versions
+    }
+    pub(crate) fn compiled(&self) -> &DenseCompiledProgram {
+        &self.compiled
+    }
+
+    pub fn execute(
+        &self,
+        periods: &[Period],
+        batches: Vec<DenseBatchSpec>,
+        outputs: &[String],
+    ) -> Result<DenseExecutionResult, DenseCompileError> {
+        for (index, period) in periods.iter().enumerate() {
+            validate_calculation_period(period)?;
+            if period.end >= self.calculation_period.start {
+                return Err(DenseCompileError::CalculationHistory(format!(
+                    "observation {index} must end before calculation starts at {}",
+                    self.calculation_period.start
+                )));
+            }
+            if index > 0
+                && (period.kind != periods[0].kind || period.start <= periods[index - 1].end)
+            {
+                return Err(DenseCompileError::CalculationHistory(format!(
+                    "observation {index} must have the same kind and follow the previous observation without overlap"
+                )));
+            }
+        }
+        for (index, batch) in batches.iter().enumerate() {
+            if !batch.relations.is_empty() {
+                return Err(DenseCompileError::Unsupported(
+                    "relation batches in calculation lifetime execution".into(),
+                ));
+            }
+            for (name, column) in &batch.inputs {
+                if !self.compiled.root_inputs.contains(name) {
+                    return Err(DenseCompileError::CalculationHistory(format!(
+                        "unknown input `{name}` in observation {index}"
+                    )));
+                }
+                if matches!(column, DenseColumn::Float(_)) {
+                    return Err(DenseCompileError::CalculationHistory(format!(
+                        "Float input `{name}` in observation {index}; exact input columns required"
+                    )));
+                }
+            }
+        }
+        // The wrapper validates completed history; the shared executor checks
+        // commencement at the bound legal date only for this private plan.
+        Ok(self
+            .compiled
+            .execute_lifetime_with::<Decimal>(periods, batches, outputs)?)
+    }
+}
+
+fn validate_calculation_period(period: &Period) -> Result<(), DenseCompileError> {
+    if period.start > period.end
+        || matches!(&period.kind, crate::model::PeriodKind::Custom(name) if name.is_empty())
+    {
+        return Err(DenseCompileError::CalculationHistory(
+            "period must have ordered dates and a nonempty custom name".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct DenseCompiledProgram {
+    calculation_period: Option<Period>,
+    selected_versions: Vec<SelectedVersion>,
     root_entity: String,
     root_inputs: Vec<String>,
     relations: Vec<DenseRelationSchema>,
@@ -958,6 +1108,18 @@ impl DenseCompiledProgram {
     pub fn from_program(
         program: &Program,
         entity: Option<&str>,
+    ) -> Result<Self, DenseCompileError> {
+        Self::prepare(program, entity, None)
+    }
+
+    /// Compile for `entity`. With a `calculation_period`, every reached rule
+    /// and parameter uses the version in force at that period's start, and
+    /// the selections are recorded; without one, the existing dense rules
+    /// for versioned formulas apply.
+    fn prepare(
+        program: &Program,
+        entity: Option<&str>,
+        calculation_period: Option<Period>,
     ) -> Result<Self, DenseCompileError> {
         crate::relation_typing::check_program(program)
             .map_err(DenseCompileError::RelationTyping)?;
@@ -994,6 +1156,7 @@ impl DenseCompiledProgram {
         }
 
         let mut compiler = DenseCompiler::new(program, root_entity.clone())?;
+        compiler.calculation_period = calculation_period;
         for name in available {
             compiler.compile_derived(&name)?;
         }
@@ -1089,6 +1252,13 @@ impl DenseCompiledProgram {
                 .map(|(output, value, _)| (output, value))
                 .collect(),
         })
+    }
+
+    /// The date law is selected at. A calculation plan fixes it at the
+    /// calculation period; otherwise each evaluation uses its own period.
+    /// Inputs and date expressions always keep the observation's period.
+    fn law_period<'a>(&'a self, observation: &'a Period) -> &'a Period {
+        self.calculation_period.as_ref().unwrap_or(observation)
     }
 
     fn resolve_outputs(&self, outputs: &[String]) -> Result<Vec<(String, usize)>, EvalError> {
@@ -1188,7 +1358,19 @@ impl DenseCompiledProgram {
         let mut bound = Vec::with_capacity(batches.len());
         let mut expected_row_count = None;
         for (index, batch) in batches.into_iter().enumerate() {
-            let bound_batch = self.bind_batch(batch)?;
+            // A calculation plan reports a missing input at the observation
+            // that lacks it, not at the calculation period.
+            let bound_batch = self.bind_batch(batch).map_err(|error| match error {
+                EvalError::MissingInput {
+                    name, entity_id, ..
+                } if self.calculation_period.is_some() => EvalError::MissingInput {
+                    name,
+                    entity_id,
+                    period_start: periods[index].start,
+                    period_end: periods[index].end,
+                },
+                error => error,
+            })?;
             match expected_row_count {
                 None => expected_row_count = Some(bound_batch.row_count),
                 Some(expected) if bound_batch.row_count != expected => {
@@ -1301,6 +1483,7 @@ impl DenseCompiledProgram {
             }
             CompiledScalarExpr::Ceil(value)
             | CompiledScalarExpr::Floor(value)
+            | CompiledScalarExpr::CalendarYearsToMonths { years: value }
             | CompiledScalarExpr::Commenced { value, .. }
             | CompiledScalarExpr::Round { value, .. } => {
                 self.scalar_reduces_over_periods(value, reduces)
@@ -1802,6 +1985,8 @@ impl<'a> CandidateAncestry<'a> {
 }
 
 struct DenseCompiler<'a> {
+    calculation_period: Option<Period>,
+    selected_versions: Vec<SelectedVersion>,
     program: &'a Program,
     root_entity: String,
     root_inputs: Vec<String>,
@@ -1879,6 +2064,8 @@ type Compiling<T> = Result<T, CompileStop>;
 impl<'a> DenseCompiler<'a> {
     fn new(program: &'a Program, root_entity: String) -> Result<Self, DenseCompileError> {
         Ok(Self {
+            calculation_period: None,
+            selected_versions: Vec::new(),
             program,
             root_entity,
             root_inputs: Vec::new(),
@@ -1952,8 +2139,16 @@ impl<'a> DenseCompiler<'a> {
         self.related_rules.last().cloned().unwrap_or_default()
     }
 
-    fn finish(self) -> DenseCompiledProgram {
+    fn finish(mut self) -> DenseCompiledProgram {
+        self.selected_versions
+            .sort_by_key(|selection| match selection {
+                SelectedVersion::UnversionedDerived { name, .. }
+                | SelectedVersion::Derived { name, .. } => (0, name.clone()),
+                SelectedVersion::Parameter { name, .. } => (1, name.clone()),
+            });
         DenseCompiledProgram {
+            calculation_period: self.calculation_period,
+            selected_versions: self.selected_versions,
             root_entity: self.root_entity,
             root_inputs: self.root_inputs,
             relations: self.relations,
@@ -2022,14 +2217,45 @@ impl<'a> DenseCompiler<'a> {
         // and its commencement enforced at execution time. Genuinely multi-version or
         // end-bounded rules still need per-period selection the dense plan cannot express, and
         // are still routed to the generic API.
-        let versioned_semantics = match derived.versions.as_slice() {
-            [] => None,
-            [only] if only.effective_to.is_none() => Some((&only.semantics, only.effective_from)),
-            _ => {
-                return Err(DenseCompileError::Unsupported(format!(
-                    "versioned derived formulas in `{name}`; use generic API execution"
-                ))
-                .into());
+        // A calculation plan instead selects the version in force at the
+        // calculation start, whatever the rule's version count, and records it.
+        let versioned_semantics = if let Some(period) = &self.calculation_period {
+            if derived.versions.is_empty() {
+                self.selected_versions
+                    .push(SelectedVersion::UnversionedDerived {
+                        name: derived.name.clone(),
+                        id: derived.id.clone(),
+                    });
+                None
+            } else {
+                let (version_index, version) =
+                    derived.version_at(period.start).ok_or_else(|| {
+                        DenseCompileError::from(EvalError::MissingDerivedFormulaVersion {
+                            derived: name.to_string(),
+                            at: period.start,
+                        })
+                    })?;
+                self.selected_versions.push(SelectedVersion::Derived {
+                    name: derived.name.clone(),
+                    id: derived.id.clone(),
+                    version_index,
+                    effective_from: version.effective_from,
+                    effective_to: version.effective_to,
+                });
+                Some((&version.semantics, version.effective_from))
+            }
+        } else {
+            match derived.versions.as_slice() {
+                [] => None,
+                [only] if only.effective_to.is_none() => {
+                    Some((&only.semantics, only.effective_from))
+                }
+                _ => {
+                    return Err(DenseCompileError::Unsupported(format!(
+                        "versioned derived formulas in `{name}`; use generic API execution"
+                    ))
+                    .into());
+                }
             }
         };
         if derived.entity != self.root_entity && derived.entity != SCALAR_ENTITY {
@@ -2177,6 +2403,11 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::Floor(value) => Ok(CompiledScalarExpr::Floor(Box::new(
                 self.compile_scalar_expr(derived_name, value)?,
             ))),
+            ScalarExpr::CalendarYearsToMonths { years } => {
+                Ok(CompiledScalarExpr::CalendarYearsToMonths {
+                    years: Box::new(self.compile_scalar_expr(derived_name, years)?),
+                })
+            }
             ScalarExpr::PeriodStart => Ok(CompiledScalarExpr::PeriodStart),
             ScalarExpr::PeriodEnd => Ok(CompiledScalarExpr::PeriodEnd),
             ScalarExpr::DateAddDays { date, days } => Ok(CompiledScalarExpr::DateAddDays {
@@ -2328,13 +2559,10 @@ impl<'a> DenseCompiler<'a> {
                     .as_ref()
                     .map(|inner| self.compile_scalar_expr(derived_name, inner).map(Box::new))
                     .transpose()?;
-                // A reduction reduces the period axis away, so nesting another
-                // reduction directly in its argument is meaningless. Reject it at
-                // compile time with a precise message rather than letting the
-                // inner reduction surface an opaque per-period error at run time.
-                if let Some(inner) = nested_over_periods_kind(&value)
-                    .or_else(|| n.as_deref().and_then(nested_over_periods_kind))
-                {
+                // The value is evaluated per observation and cannot itself
+                // consume the period axis. The top-N count is different: it can
+                // use a lifetime reduction to choose how many observations to keep.
+                if let Some(inner) = nested_over_periods_kind(&value) {
                     return Err(DenseCompileError::NestedOverPeriods {
                         outer: kind.as_call_name(),
                         inner: inner.as_call_name(),
@@ -2700,6 +2928,11 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::Floor(value) => Ok(CompiledRelatedScalarExpr::Floor(Box::new(
                 self.compile_related_scalar(relation_index, value)?,
             ))),
+            ScalarExpr::CalendarYearsToMonths { years } => {
+                Ok(CompiledRelatedScalarExpr::CalendarYearsToMonths {
+                    years: Box::new(self.compile_related_scalar(relation_index, years)?),
+                })
+            }
             ScalarExpr::PeriodStart => Ok(CompiledRelatedScalarExpr::PeriodStart),
             ScalarExpr::PeriodEnd => Ok(CompiledRelatedScalarExpr::PeriodEnd),
             ScalarExpr::DateAddDays { date, days } => Ok(CompiledRelatedScalarExpr::DateAddDays {
@@ -2891,6 +3124,15 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::Floor(value) => Ok(CompiledScalarExpr::Floor(Box::new(
                 self.compile_current_scalar_expr(derived_name, entity, value)?,
             ))),
+            ScalarExpr::CalendarYearsToMonths { years } => {
+                Ok(CompiledScalarExpr::CalendarYearsToMonths {
+                    years: Box::new(self.compile_current_scalar_expr(
+                        derived_name,
+                        entity,
+                        years,
+                    )?),
+                })
+            }
             ScalarExpr::PeriodStart => Ok(CompiledScalarExpr::PeriodStart),
             ScalarExpr::PeriodEnd => Ok(CompiledScalarExpr::PeriodEnd),
             ScalarExpr::DateAddDays { date, days } => Ok(CompiledScalarExpr::DateAddDays {
@@ -3288,6 +3530,21 @@ impl<'a> DenseCompiler<'a> {
             self.program.parameters.get(name).ok_or_else(|| {
                 DenseCompileError::Unsupported(format!("unknown parameter `{name}`"))
             })?;
+        if let Some(period) = &self.calculation_period {
+            let (version_index, version) = parameter.version_at(period.start).ok_or_else(|| {
+                DenseCompileError::MissingParameterVersion {
+                    parameter: name.to_string(),
+                    at: period.start,
+                }
+            })?;
+            self.selected_versions.push(SelectedVersion::Parameter {
+                name: parameter.name.clone(),
+                id: parameter.id.clone(),
+                version_index,
+                effective_from: version.effective_from,
+                effective_to: version.effective_to,
+            });
+        }
         let index = self.parameters.len();
         self.parameters.push(CompiledParameter::new(parameter));
         self.parameter_index.insert(name.to_string(), index);
@@ -3792,6 +4049,42 @@ fn eval_unary<N: DenseNum, E, A: ColumnAxis<N, E>>(
     Ok((N::into_column(result), errors))
 }
 
+/// `calendar_years_to_months`: whole Integer or exactly integral Decimal
+/// years to Integer months, row by row, failing only the rows that reach a
+/// Float, a fraction, another dtype or an overflow (as on the explain path).
+fn eval_calendar_years_to_months<N: DenseNum, E, A: ColumnAxis<N, E>>(
+    axis: &mut A,
+    years: &E,
+    mask: &RowMask,
+) -> Flow<DenseEval> {
+    let (column, mut errors) = axis.eval_column(years, mask)?;
+    let live = mask.without(&errors)?;
+    let mut months = filled_rows(axis.axis_len(), 0_i64)?;
+    for row in live.rows() {
+        let converted = match &column {
+            DenseColumn::Integer(values) => {
+                crate::engine::calendar_years_to_months(&ScalarValue::Integer(values[row]))
+            }
+            DenseColumn::Decimal(values) => {
+                crate::engine::calendar_years_to_months(&ScalarValue::Decimal(values[row]))
+            }
+            DenseColumn::Float(_) => Err(EvalError::TypeMismatch(
+                "calendar_years_to_months does not accept Float years; use exact Decimal execution"
+                    .to_string(),
+            )),
+            _ => Err(EvalError::TypeMismatch(
+                "calendar_years_to_months requires Integer or exactly integral Decimal years"
+                    .to_string(),
+            )),
+        };
+        match converted {
+            Ok(value) => months[row] = value,
+            Err(error) => errors.record(row, error),
+        }
+    }
+    Ok((DenseColumn::Integer(months), errors))
+}
+
 /// `date_add_days`/`_months`/`_years`: the date, then the count, then the
 /// checked shift, as on the explain path.
 fn eval_date_shift<N: DenseNum, E, A: ColumnAxis<N, E>>(
@@ -4098,12 +4391,15 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
     /// typed, under an empty mask.
     fn commencement_error(&self, derived_index: usize) -> Option<EvalError> {
         let derived = &self.program.derived[derived_index];
+        // A calculation plan selected each version at the calculation start,
+        // so commencement is checked there, not at the observation date.
+        let law_period = self.program.law_period(self.period);
         if let Some(effective_from) = derived.effective_from
-            && self.period.start < effective_from
+            && law_period.start < effective_from
         {
             return Some(EvalError::MissingDerivedFormulaVersion {
                 derived: derived.name.clone(),
-                at: self.period.start,
+                at: law_period.start,
             });
         }
         None
@@ -4198,7 +4494,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             )),
             CompiledScalarExpr::Derived(index) => self.evaluate_scalar(*index, mask),
             CompiledScalarExpr::Commenced { rule, value } => {
-                let (live, mut errors) = rule.rows(self.period, mask);
+                let (live, mut errors) = rule.rows(self.program.law_period(self.period), mask);
                 let (values, formula_errors) = self.eval_scalar_expr(value, &live)?;
                 errors.absorb(formula_errors);
                 Ok((values, errors))
@@ -4213,7 +4509,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                     &self.program.parameters[*parameter],
                     &keys,
                     &live,
-                    self.period,
+                    self.program.law_period(self.period),
                     &mut errors,
                 )?;
                 Ok((column, errors))
@@ -4243,6 +4539,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             }
             CompiledScalarExpr::Floor(value) => {
                 eval_unary::<N, _, _>(self, value, mask, |value| value.floor())
+            }
+            CompiledScalarExpr::CalendarYearsToMonths { years } => {
+                eval_calendar_years_to_months::<N, _, _>(self, years, mask)
             }
             CompiledScalarExpr::PeriodStart => Ok((
                 DenseColumn::Date(filled_rows(len, self.period.start)?),
@@ -4814,7 +5113,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         let length = self.batch.relations[relation].related_count;
         match expr {
             CompiledRelatedJudgmentExpr::Commenced { rule, value } => {
-                let (live, mut errors) = rule.rows(self.period, mask);
+                let (live, mut errors) = rule.rows(self.program.law_period(self.period), mask);
                 let (values, formula_errors) =
                     self.eval_related_predicate(relation, value, &live)?;
                 errors.absorb(formula_errors);
@@ -4894,7 +5193,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         let length = self.batch.relations[relation].related_count;
         match expr {
             CompiledRelatedScalarExpr::Commenced { rule, value } => {
-                let (live, mut errors) = rule.rows(self.period, mask);
+                let (live, mut errors) = rule.rows(self.program.law_period(self.period), mask);
                 let (values, formula_errors) =
                     self.resolve_related_scalar(relation, value, &live)?;
                 errors.absorb(formula_errors);
@@ -4954,7 +5253,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                     &self.program.parameters[*parameter],
                     &keys,
                     &live,
-                    self.period,
+                    self.program.law_period(self.period),
                     &mut errors,
                 )?;
                 Ok((column, errors))
@@ -5035,6 +5334,16 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 mask,
                 |value| value.floor(),
             ),
+            CompiledRelatedScalarExpr::CalendarYearsToMonths { years } => {
+                eval_calendar_years_to_months::<N, _, _>(
+                    &mut RelatedAxis {
+                        executor: self,
+                        relation,
+                    },
+                    years,
+                    mask,
+                )
+            }
             CompiledRelatedScalarExpr::PeriodStart => Ok((
                 DenseColumn::Date(filled_rows(length, self.period.start)?),
                 RowErrors::new(),
@@ -5156,7 +5465,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             }
             CompiledJudgmentExpr::Derived(index) => self.evaluate_judgment(*index, mask),
             CompiledJudgmentExpr::Commenced { rule, value } => {
-                let (live, mut errors) = rule.rows(self.period, mask);
+                let (live, mut errors) = rule.rows(self.program.law_period(self.period), mask);
                 let (values, formula_errors) = self.eval_judgment_expr(value, &live)?;
                 errors.absorb(formula_errors);
                 Ok((values, errors))
@@ -5213,6 +5522,15 @@ struct LifetimeExecutor<'a, N: DenseNum> {
     /// Expression levels evaluated since the driver last reported them (see
     /// [`crate::depth::count_visits`]).
     visits: usize,
+    /// Set while a top-N count that itself reduces over periods evaluates.
+    /// A parameter read outside a reduction is then looked up in every period
+    /// and must agree, as an ordinary count's must, instead of resolving at
+    /// the reference period alone. The count runs with its own caches, so an
+    /// ordinary lifetime value never stands in for a checked one.
+    invariant_count_context: bool,
+    /// For each compiled rule, whether it reduces over periods, so a top-N
+    /// count can tell whether it has a per-period value.
+    reducing_rules: Vec<bool>,
 }
 
 impl<N: DenseNum> Deferring for LifetimeExecutor<'_, N> {
@@ -5279,6 +5597,8 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             depth: 0,
             suspend_depth: crate::depth::suspend_depth(),
             visits: 0,
+            invariant_count_context: false,
+            reducing_rules: program.rules_reducing_over_periods(),
         }
     }
 
@@ -5416,8 +5736,11 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             }
             CompiledScalarExpr::Derived(index) => self.evaluate_scalar(*index, mask),
             CompiledScalarExpr::Commenced { rule, value } => {
-                let (live, mut errors) =
-                    rule.rows(self.period_executors[self.reference_period].period, mask);
+                let (live, mut errors) = rule.rows(
+                    self.program
+                        .law_period(self.period_executors[self.reference_period].period),
+                    mask,
+                );
                 let (column, formula_errors) = self.eval_scalar(value, &live)?;
                 errors.absorb(formula_errors);
                 Ok((column, errors))
@@ -5430,14 +5753,35 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 // expression is itself lifetime-evaluated (typically a literal
                 // or derived), then used as integer keys.
                 let (keys, mut errors) = self.eval_scalar(index, mask)?;
-                let live = mask.without(&errors)?;
-                let column = lookup_parameter_dense::<N>(
-                    &self.program.parameters[*parameter],
-                    &keys,
-                    &live,
-                    self.period_executors[self.reference_period].period,
-                    &mut errors,
-                )?;
+                let mut live = mask.without(&errors)?;
+                let parameter = &self.program.parameters[*parameter];
+                if !self.invariant_count_context {
+                    let column = lookup_parameter_dense::<N>(
+                        parameter,
+                        &keys,
+                        &live,
+                        self.program
+                            .law_period(self.period_executors[self.reference_period].period),
+                        &mut errors,
+                    )?;
+                    return Ok((column, errors));
+                }
+                // Inside a reduction-bearing top-N count: the value must not
+                // depend on which period it is read at.
+                let mut per_period = Vec::with_capacity(self.period_executors.len());
+                for executor in &self.period_executors {
+                    let mut lookup = RowErrors::new();
+                    per_period.push(lookup_parameter_dense::<N>(
+                        parameter,
+                        &keys,
+                        &live,
+                        self.program.law_period(executor.period),
+                        &mut lookup,
+                    )?);
+                    live = live.without(&lookup)?;
+                    errors.absorb(lookup);
+                }
+                let column = self.invariant_top_n_column(per_period, &mut live, &mut errors)?;
                 Ok((column, errors))
             }
             CompiledScalarExpr::Add(items) => eval_add::<N, _, _>(self, items, mask),
@@ -5465,6 +5809,9 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             }
             CompiledScalarExpr::Floor(value) => {
                 eval_unary::<N, _, _>(self, value, mask, |value| value.floor())
+            }
+            CompiledScalarExpr::CalendarYearsToMonths { years } => {
+                eval_calendar_years_to_months::<N, _, _>(self, years, mask)
             }
             CompiledScalarExpr::NoMatch {
                 subject,
@@ -5713,39 +6060,33 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         // is caught below; an n derived from period-invariant inputs (the
         // 42 USC 415(b) computation-year count) is identical in every period and
         // passes.
+        //
+        // A count that itself reduces over periods (a per-person count of
+        // qualifying years, say) has no per-period value. It is evaluated
+        // once in lifetime context instead: values inside its reductions keep
+        // each observation's period, and anything outside them must still be
+        // period-invariant (bare inputs as for any lifetime value, parameters
+        // through `invariant_count_context`).
         let mut live = mask.clone();
-        let mut per_period: Vec<DenseColumn> = Vec::with_capacity(self.period_executors.len());
-        for executor in &mut self.period_executors {
-            let (column, period_errors) = executor.drive_expr(n, &live)?;
-            live = live.without(&period_errors)?;
-            errors.absorb(period_errors);
-            per_period.push(column);
-        }
-        let (reference, others) = per_period
-            .split_last()
-            .expect("lifetime execution guarantees at least one period");
-        // Reject a period-varying n: compare every earlier period against the
-        // reference (chronologically-last) period, in each column's own dtype.
-        // Each error quotes both values without copying them (`n` can be a
-        // text); consecutive rows with the same pair share one.
-        let mut varying = RowErrors::new();
-        let second_period: Arc<str> = Arc::from(period_label(
-            self.period_executors[self.reference_period].period,
-        ));
-        for (index, column) in others.iter().enumerate() {
-            let first_period: Arc<str> =
-                Arc::from(period_label(self.period_executors[index].period));
-            record_top_n_varying(
-                reduction,
-                (&first_period, column),
-                (&second_period, reference),
-                &live,
-                self.row_count,
-                &mut varying,
-            );
-        }
-        live = live.without(&varying)?;
-        errors.absorb(varying);
+        let reference = if self
+            .program
+            .scalar_reduces_over_periods(n, &self.reducing_rules)
+        {
+            let (column, count_errors) = self.eval_lifetime_top_n(n, &live)?;
+            live = live.without(&count_errors)?;
+            errors.absorb(count_errors);
+            column
+        } else {
+            let mut per_period: Vec<DenseColumn> = Vec::with_capacity(self.period_executors.len());
+            for executor in &mut self.period_executors {
+                let (column, period_errors) = executor.drive_expr(n, &live)?;
+                live = live.without(&period_errors)?;
+                errors.absorb(period_errors);
+                per_period.push(column);
+            }
+            self.invariant_top_n_column(per_period, &mut live, errors)?
+        };
+        let reference = &reference;
 
         // n is period-invariant: truncate the reference column toward zero to an
         // exact i64 and enforce 1 <= n <= period_count per row.
@@ -5784,6 +6125,73 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             }
         }
         Ok(counts)
+    }
+
+    /// Evaluate a reduction-bearing top-N count in lifetime context, under a
+    /// driver of its own. The count gets fresh caches: an ordinary lifetime
+    /// value resolved its parameters at the reference period only, so reusing
+    /// one would skip the invariance check, and a checked value must not leak
+    /// back. Rules deferred for depth run inside this context, so no deferral
+    /// escapes it. The executor's caches, depth and flag are restored on every
+    /// path.
+    fn eval_lifetime_top_n(&mut self, n: &CompiledScalarExpr, mask: &RowMask) -> Flow<DenseEval> {
+        if self.invariant_count_context {
+            return self.eval_scalar(n, mask);
+        }
+        let fresh = self.program.derived.len();
+        let scalar_cache =
+            std::mem::replace(&mut self.scalar_cache, (0..fresh).map(|_| None).collect());
+        let judgment_cache =
+            std::mem::replace(&mut self.judgment_cache, (0..fresh).map(|_| None).collect());
+        let depth = self.depth;
+        self.invariant_count_context = true;
+        let program = self.program;
+        let result = drive(
+            self,
+            |executor| executor.eval_scalar(n, mask),
+            |index| program.derived[index].name.clone(),
+        );
+        self.invariant_count_context = false;
+        self.depth = depth;
+        self.scalar_cache = scalar_cache;
+        self.judgment_cache = judgment_cache;
+        Ok(result?)
+    }
+
+    /// The reference (chronologically last) period's column, after failing
+    /// each row of `live` whose value differs in an earlier period. Columns
+    /// compare in their own dtype.
+    fn invariant_top_n_column(
+        &self,
+        mut per_period: Vec<DenseColumn>,
+        live: &mut RowMask,
+        errors: &mut RowErrors,
+    ) -> Result<DenseColumn, EvalError> {
+        let reduction = OverPeriodsKind::SumTopN.as_call_name();
+        let reference = per_period
+            .pop()
+            .expect("lifetime execution guarantees at least one period");
+        // Each error quotes both values without copying them (`n` can be a
+        // text); consecutive rows with the same pair share one.
+        let mut varying = RowErrors::new();
+        let second_period: Arc<str> = Arc::from(period_label(
+            self.period_executors[self.reference_period].period,
+        ));
+        for (index, column) in per_period.iter().enumerate() {
+            let first_period: Arc<str> =
+                Arc::from(period_label(self.period_executors[index].period));
+            record_top_n_varying(
+                reduction,
+                (&first_period, column),
+                (&second_period, &reference),
+                live,
+                self.row_count,
+                &mut varying,
+            );
+        }
+        *live = live.without(&varying)?;
+        errors.absorb(varying);
+        Ok(reference)
     }
 
     /// Bind a bare input evaluated OUTSIDE any reduction, when — and only when —
@@ -5867,8 +6275,11 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             }
             CompiledJudgmentExpr::Derived(index) => self.evaluate_judgment(*index, mask),
             CompiledJudgmentExpr::Commenced { rule, value } => {
-                let (live, mut errors) =
-                    rule.rows(self.period_executors[self.reference_period].period, mask);
+                let (live, mut errors) = rule.rows(
+                    self.program
+                        .law_period(self.period_executors[self.reference_period].period),
+                    mask,
+                );
                 let (values, formula_errors) = self.eval_judgment(value, &live)?;
                 errors.absorb(formula_errors);
                 Ok((values, errors))
@@ -6026,6 +6437,7 @@ fn nested_over_periods_kind(expr: &CompiledScalarExpr) -> Option<OverPeriodsKind
         }
         CompiledScalarExpr::Ceil(value)
         | CompiledScalarExpr::Floor(value)
+        | CompiledScalarExpr::CalendarYearsToMonths { years: value }
         | CompiledScalarExpr::Commenced { value, .. }
         | CompiledScalarExpr::Round { value, .. } => nested_over_periods_kind(value),
         CompiledScalarExpr::DateAddDays { date, days } => {
@@ -6367,12 +6779,7 @@ fn lookup_parameter_dense<N: DenseNum>(
 ) -> Result<DenseColumn, EvalError> {
     let parameter = &compiled.parameter;
     let len = keys.len();
-    let selected = parameter
-        .versions
-        .iter()
-        .enumerate()
-        .filter(|(_, version)| version.applies_at(period.start))
-        .max_by_key(|(_, version)| version.effective_from);
+    let selected = parameter.version_at(period.start);
     let version = selected.map(|(_, version)| version);
     let texts = selected.map(|(index, _)| &compiled.texts[index]);
     let lookup = |row: usize| -> Result<&ScalarValue, EvalError> {

@@ -4,6 +4,56 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-11-02 — Lifetime execution can fix law at a calculation period
+
+**Decision.** Add a `run-lifetime` CLI command and its JSON wire, with
+schemas `lifetime-request`/`lifetime-response` v1 and v2. v1 runs the
+existing Decimal lifetime executor on aligned period batches. v2 adds
+`calculation_period`: every rule and parameter table the program reaches uses
+the version in force at that period's start, while each observation keeps
+its own dates for inputs and `period_start`/`period_end`. The Rust surface
+is `dense::CalculationLifetimePlan` and `dense::SelectedVersion`; the response
+reports each selected version's original index and bounds. Add the formula
+builtin `calendar_years_to_months(years)`. A `sum_top_n_over_periods` count
+may itself reduce over periods (`count_over_periods(...)`), evaluated once
+per row in lifetime context.
+
+**Why.** A benefit computed in one year often applies that year's formula
+and tables to a completed earnings history. Selecting law at each
+observation's date answers a different question, and v1's reference date,
+the last observation's start, is not the calculation year when the history
+ends earlier.
+The count of years to keep is itself often a count over the history, which
+the top-N count could not express.
+
+**Consequences.**
+
+- v2 refuses relations, Float input columns, inputs no rule for the entity
+  reads, and observations that do not end before the calculation starts. A
+  missing formula or table version at the calculation start is refused by
+  name, with no fallback to an older version.
+- Commencement in a calculation plan is checked at the calculation start;
+  v1 keeps main's per-rule check (#270).
+- In a nested count, values inside its reductions keep each period.
+  Outside them, a value must agree across periods, or that row fails:
+  - a bare input with `LifetimePeriodVaryingInput`, as any bare lifetime
+    input does;
+  - a parameter with `OverPeriodsTopNPeriodVarying`, except in a plan, which
+    fixes the parameter's version.
+
+  The same varying input used as a flat count fails with
+  `OverPeriodsTopNPeriodVarying` instead
+  (`tests/lifetime_law_properties.rs`,
+  `period_varying_values_in_a_count_fail_with_their_own_errors`).
+- `calendar_years_to_months` takes Integer or exactly integral Decimal years
+  and refuses Float, fractions and i64 overflow. Fast mode declines it, and
+  the artifact node extends format 3 (see `docs/artifact-format.md`).
+- `docs/lifetime-cli.md`, `docs/calendar-unit-conversion.md` and
+  `docs/execution-semantics.md` give the contracts. The tests are
+  `tests/lifetime_cli.rs`, `tests/lifetime_calculation.rs`,
+  `tests/lifetime_law_properties.rs` and the cross-path differential
+  `tests/lifetime_differential.rs`.
+
 ## 2026-11-02 — Dense text columns share their values
 
 **Decision.** `DenseColumn::Text` holds `Vec<Arc<str>>` instead of

@@ -355,6 +355,7 @@ rules:
 | `max(relation.field)` | 1 | greatest `field` over related entities; fails when there is none |
 | `ceil(x)` | 1 | round up to an integer |
 | `floor(x)` | 1 | round down to an integer |
+| `calendar_years_to_months(years)` | 1 | convert signed whole Gregorian calendar-year units to exact Integer month units; reject fractions, Float and overflow |
 | `days_between(from, to)` | 2 | day count between two dates |
 | `date_add_days(date, days)` | 2 | shift a date by a day count |
 | `date_add_months(date, months)` | 2 | shift by an integer number of calendar months; clamp a missing target day to month end |
@@ -373,7 +374,7 @@ rules:
 
 The `_where` predicate names a Boolean input or a derived judgment computed
 on the related entity. The lowerer enforces the fixed arities (`ceil`,
-`floor`, `days_between`, `date_add_days`, `date_add_months`, `date_add_years`,
+`floor`, `calendar_years_to_months`, `days_between`, `date_add_days`, `date_add_months`, `date_add_years`,
 `count_where`, `sum_where`, `min_where`, `max_where`, `only`, and the
 reductions); `max` and `min` take one or more arguments. They aggregate over
 related entities only when their single argument is a relation field access
@@ -386,6 +387,15 @@ under the lifetime execution surface; per-period execution paths reject
 them, and an unrecognized `*_over_periods` name fails lowering with an error
 that lists the supported reductions. Any other unknown function name fails
 lowering.
+
+`calendar_years_to_months` accepts Integer and exactly integral Decimal values,
+including zero and negative values, and returns an Integer using checked
+signed 64-bit arithmetic. It converts quantities of whole calendar years; it
+does not measure date intervals, partial years, covered months, or eligibility.
+The caller must establish the whole-year interpretation. Float arguments are
+rejected even when they appear integral; use Decimal execution for counts
+produced by arithmetic. See [calendar unit conversion](calendar-unit-conversion.md)
+for lifetime use and execution-mode limits.
 
 ```yaml
 format: rulespec/v1
@@ -553,8 +563,8 @@ JSON Schemas give exact field shapes.
 
 Scalar kinds: `literal`, `input`, `input_for_year`, `derived`,
 `parameter_lookup`, `add`, `sub`, `mul`, `div`, `max`, `min`, `ceil`,
-`floor`, `period_start`, `period_end`, `date_add_days`, `date_add_months`,
-`date_add_years`, `days_between`, `only_related`, `single_related`,
+`floor`, `calendar_years_to_months`, `period_start`, `period_end`,
+`date_add_days`, `date_add_months`, `date_add_years`, `days_between`, `only_related`, `single_related`,
 `count_related`, `sum_related`, `extreme_related`, `if`, `no_match`,
 `over_periods`.
 
