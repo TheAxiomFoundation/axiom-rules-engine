@@ -6,7 +6,8 @@
 # - pin actions and the checksum-verified cargo-dist 0.31.0 binary immutably
 # - cargo fetch --locked before each offline dist build (populate the cache so
 #   the offline build cannot resolve newer deps, and does not fail on a clean runner)
-# - validate Cargo.lock with --locked/--offline and force dist builds offline
+# - validate Cargo.lock with --locked/--offline, make it read-only before each
+#   dist build, and force dist builds offline
 # - install dist in build-local-artifacts from each platform's archive, checked
 #   against a pinned digest, and fail on any other runner (#114)
 # - run Cleanup under bash with set -euo pipefail, and strip the blank lines from
