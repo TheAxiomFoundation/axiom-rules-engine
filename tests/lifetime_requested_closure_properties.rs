@@ -11,7 +11,7 @@
 #[path = "support/artifact_interface_generator.rs"]
 mod generator;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::dense::{
@@ -22,6 +22,7 @@ use axiom_rules_engine::lifetime_api::{
     LifetimeApiError, execute_lifetime_wire_request, parse_lifetime_wire_request,
 };
 use axiom_rules_engine::model::{Period, PeriodKind};
+use axiom_rules_engine::relation_typing::filtered_entity_kinds;
 use axiom_rules_engine::spec::{DerivedSpec, ProgramSpec};
 use proptest::prelude::*;
 use rust_decimal::Decimal;
@@ -313,6 +314,51 @@ fn whole_refusal(
     }
 }
 
+/// Each input a whole-root compile reads, by entity, and whether the interface
+/// lists that input for the entity's kind.
+fn whole_root_inputs(artifact: &CompiledProgramArtifact) -> Vec<(String, String, bool)> {
+    let interface = artifact.interface.as_ref().unwrap();
+    let model = artifact.program.to_program().unwrap();
+    let kinds = filtered_entity_kinds(&model);
+    let entities = artifact
+        .program
+        .derived
+        .iter()
+        .map(|rule| rule.entity.clone())
+        .collect::<BTreeSet<_>>();
+    let mut read = Vec::new();
+    for entity in entities {
+        let Ok(dense) = DenseCompiledProgram::from_artifact(artifact, Some(&entity)) else {
+            continue;
+        };
+        let kind = kinds.get(&entity).unwrap_or(&entity);
+        for input in dense.root_inputs() {
+            let listed = interface
+                .inputs
+                .iter()
+                .any(|slot| slot.name == *input && slot.entities.contains(kind));
+            read.push((entity.clone(), input.clone(), listed));
+        }
+    }
+    read
+}
+
+#[test]
+fn the_admission_property_reads_real_whole_roots() {
+    let reads = (0..=255_u8)
+        .map(|seed| {
+            let choices = (0..80_u8)
+                .map(|index| {
+                    seed.wrapping_mul(31)
+                        .wrapping_add(index.wrapping_mul(seed | 1))
+                })
+                .collect::<Vec<_>>();
+            whole_root_inputs(&artifact(generator::generate(&choices, false).program)).len()
+        })
+        .sum::<usize>();
+    assert!(reads > 0, "no generated whole root read an input");
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 64,
@@ -379,6 +425,16 @@ proptest! {
                     "output {} with calculation={}", name, calculation,
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_input_a_whole_root_reads_stays_admitted(
+        choices in proptest::collection::vec(any::<u8>(), 0..80),
+    ) {
+        let artifact = artifact(generator::generate(&choices, false).program);
+        for (entity, input, listed) in whole_root_inputs(&artifact) {
+            prop_assert!(listed, "{} reads {} outside the interface", entity, input);
         }
     }
 
