@@ -405,9 +405,17 @@ A calculation lifetime plan (`dense::CalculationLifetimePlan`, behind the
 instead. Every rule and parameter it reaches uses the version in force at the
 calculation period's start, whatever its version count, and commencement is
 checked against that date. Inputs, `period_start` and `period_end` keep each
-observation's period. The plan refuses relations, Float input columns and
-observations that do not end before the calculation starts; see
+observation's period. The plan refuses compiled relation contexts, Float input
+columns and observations that do not end before the calculation starts; see
 [the lifetime CLI](lifetime-cli.md).
+
+Both lifetime wire versions compile only the requested outputs and the rules
+and parameters they reach. Dense refuses an unsupported rule or a relation
+context only inside that closure; artifact admission and relation entity typing
+still check the whole program. The v2 response's `selected_versions` lists only
+the derived rules and parameters those outputs reach. The public Rust
+`CalculationLifetimePlan::from_artifact` still compiles every rule of the entity
+and its dependencies, including rules the execution's output list leaves out.
 
 In an output that reduces over periods, a relation aggregation outside
 the reduction has no period to read and fails with `LifetimeAmbiguousLeaf`,

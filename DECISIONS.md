@@ -4,6 +4,42 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-11-05 — Lifetime requests compile only what their outputs reach
+
+**Decision.** Both lifetime wire versions bind each requested output's durable
+ID first, then compile those outputs and the rules and parameters they reach,
+and no other rule. For Rust callers, `CalculationLifetimePlan::from_artifact`,
+`DenseCompiledProgram::from_program` and `from_artifact` still compile every
+rule of the entity.
+
+**Why.** The API compiled every rule of the request's entity before it read
+`outputs`, so a rule no output reaches could refuse the request by reading
+another entity's rule directly or by reading a relation (#298). #292 gave dense
+a requested compile, and lifetime requests now use it with v2's calculation-date
+version selection.
+
+**Consequences.**
+
+- Dense still refuses a rule a requested output reaches, with the same error
+  and message, and a request the API accepted before returns the same outputs
+  (`tests/lifetime_requested_closure_properties.rs`).
+- A request may name any `Scalar` rule as an output. The whole-root compile
+  listed only the `Scalar` rules a root rule reaches, so the API used to answer
+  "unknown public output" for any other.
+- A request that names an unknown output gets that error even when another of
+  its outputs reaches a rule dense refuses. It used to get the compile refusal.
+- The API refuses an entity no rule belongs to with `UnknownEntity` itself, since
+  a closure of `Scalar` rules would otherwise run for an entity the program never
+  mentions.
+- The API accepts a column when the artifact's interface lists that input for
+  the kind of the request's entity, and gives the plan only the columns the
+  closure reads. Every column the whole-root check accepted stays accepted. Three
+  more now pass and go unread: one that only a filtered entity's rule of that
+  kind reads, one that only an out-of-force formula version reads, and one that
+  another entity's rule reads on behalf of a rule of this kind. The API still
+  refuses a column no rule of the kind reads.
+- v2's `selected_versions` lists only the rules and parameters the outputs reach.
+
 ## 2026-11-03 — Formula and input errors name what the user wrote
 
 **Decision.** Three errors now report what the user wrote, not what the
@@ -142,10 +178,10 @@ the top-N count could not express.
 
 **Consequences.**
 
-- v2 refuses relations, Float input columns, inputs no rule for the entity
-  reads, and observations that do not end before the calculation starts. A
-  missing formula or table version at the calculation start is refused by
-  name, with no fallback to an older version.
+- v2 refuses relations a requested output reaches, Float input columns, inputs
+  no rule for the entity reads, and observations that do not end before the
+  calculation starts. A missing formula or table version at the calculation
+  start is refused by name, with no fallback to an older version.
 - Commencement in a calculation plan is checked at the calculation start;
   v1 keeps main's per-rule check (#270).
 - In a nested count, values inside its reductions keep each period.

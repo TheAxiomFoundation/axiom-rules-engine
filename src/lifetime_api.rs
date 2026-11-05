@@ -20,7 +20,7 @@ use crate::dense::{
     DenseOutputValue, SelectedVersion,
 };
 use crate::engine::EvalError;
-use crate::model::{Period, PeriodKind};
+use crate::model::{Period, PeriodKind, SCALAR_ENTITY};
 use crate::spec::{DTypeSpec, JudgmentOutcomeSpec, SpecError};
 
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
@@ -552,37 +552,19 @@ fn execute_lifetime_internal(
         }
     }
     let program = artifact.program.to_program()?;
-    let calculation = calculation_period
-        .map(|period| {
-            if let LifetimePeriod::Custom { name, .. } = period {
-                check_string(name, "calculation_period.name")?;
-            }
-            Ok::<_, LifetimeApiError>(
-                CalculationLifetimePlan::from_program(&program, &request.entity, period.to_model())
-                    .map_err(LifetimeApiError::Calculation)?,
-            )
-        })
-        .transpose()?;
-    let legacy = if calculation.is_none() {
-        Some(DenseCompiledProgram::from_program(
-            &program,
-            Some(&request.entity),
-        )?)
-    } else {
-        None
-    };
-    let dense = match &calculation {
-        Some(plan) => plan.compiled(),
-        None => legacy.as_ref().expect("legacy plan prepared"),
-    };
-    if !dense.relations().is_empty() {
-        return Err(LifetimeApiError::Unsupported(
-            "relation context is not supported by lifetime JSON v1".into(),
-        ));
+    // A requested closure compiles the rules it names, so without this check an
+    // entity-free output would run for an entity the program never mentions.
+    if !program
+        .derived
+        .values()
+        .any(|derived| derived.entity == request.entity)
+    {
+        let unknown = DenseCompileError::UnknownEntity(request.entity.clone());
+        return Err(match calculation_period {
+            Some(_) => LifetimeApiError::Calculation(unknown),
+            None => unknown.into(),
+        });
     }
-    let catalog = program.input_catalog();
-    let root_inputs: HashSet<&str> = dense.root_inputs().iter().map(String::as_str).collect();
-    let available_outputs: HashSet<String> = dense.output_names().into_iter().collect();
     let mut outputs = Vec::new();
     let mut seen_outputs = HashSet::new();
     for reference in &request.outputs {
@@ -596,12 +578,10 @@ fn execute_lifetime_internal(
         let name = program
             .resolve_derived_name(reference)
             .filter(|name| {
-                available_outputs.contains(name)
-                    && program
-                        .derived
-                        .get(name)
-                        .and_then(|derived| derived.id.as_deref())
-                        == Some(reference.as_str())
+                program.derived.get(name).is_some_and(|derived| {
+                    (derived.entity == request.entity || derived.entity == SCALAR_ENTITY)
+                        && derived.id.as_deref() == Some(reference.as_str())
+                })
             })
             .ok_or_else(|| {
                 LifetimeApiError::invalid(
@@ -617,6 +597,56 @@ fn execute_lifetime_internal(
         }
         outputs.push(name);
     }
+    let calculation = calculation_period
+        .map(|period| {
+            if let LifetimePeriod::Custom { name, .. } = period {
+                check_string(name, "calculation_period.name")?;
+            }
+            Ok::<_, LifetimeApiError>(
+                CalculationLifetimePlan::from_program_for_outputs(
+                    &program,
+                    &request.entity,
+                    period.to_model(),
+                    &outputs,
+                )
+                .map_err(LifetimeApiError::Calculation)?,
+            )
+        })
+        .transpose()?;
+    let legacy = if calculation.is_none() {
+        Some(DenseCompiledProgram::from_program_for_outputs(
+            &program,
+            Some(&request.entity),
+            &outputs,
+        )?)
+    } else {
+        None
+    };
+    let dense = match &calculation {
+        Some(plan) => plan.compiled(),
+        None => legacy.as_ref().expect("legacy plan prepared"),
+    };
+    if !dense.relations().is_empty() {
+        return Err(LifetimeApiError::Unsupported(
+            "relation context is not supported by lifetime JSON v1".into(),
+        ));
+    }
+    let catalog = program.input_catalog();
+    let needed_inputs: HashSet<&str> = dense.root_inputs().iter().map(String::as_str).collect();
+    // A previously accepted request can supply columns read only by other
+    // roots. Keep admitting those columns using the checked artifact interface,
+    // without compiling the roots, then pass only needed columns to the plan.
+    let entity_kinds = crate::relation_typing::filtered_entity_kinds(&program);
+    let root_kind = entity_kinds.get(&request.entity).unwrap_or(&request.entity);
+    let mut root_inputs = needed_inputs.clone();
+    root_inputs.extend(
+        artifact
+            .interface
+            .iter()
+            .flat_map(|interface| &interface.inputs)
+            .filter(|input| input.entities.contains(root_kind))
+            .map(|input| input.name.as_str()),
+    );
     let entity_ids = request.batches[0].entity_ids.clone();
     if entity_ids
         .len()
@@ -718,6 +748,7 @@ fn execute_lifetime_internal(
                 "total supplied cell count exceeds limit",
             ));
         }
+        inputs.retain(|name, _| needed_inputs.contains(name.as_str()));
         batches.push(DenseBatchSpec {
             row_count: batch.row_count,
             inputs,
