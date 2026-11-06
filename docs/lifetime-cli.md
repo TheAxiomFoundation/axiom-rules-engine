@@ -6,6 +6,11 @@ from standard input and runs the compiled artifact through
 arithmetic. The command and [Rust API](../src/lifetime_api.rs) share validation.
 The existing `run-compiled` command keeps its scalar request format.
 
+Both lifetime wire versions compile only the requested outputs and the rules
+and parameters they reach. Dense refuses an unsupported rule or a relation
+context only inside that closure; artifact admission and relation entity typing
+still check the whole program.
+
 The request uses the following shape. This example describes two invented
 observations; it requires an artifact whose public input and output IDs match.
 
@@ -46,11 +51,37 @@ Every batch must contain the same unique, nonempty string `entity_ids` in the
 same order. Each input column length equals `row_count`. These IDs declare row
 alignment; the engine does not authenticate identity or infer links. Zero rows
 remain zero rows. Input names must appear in the artifact's
-[input catalog](../src/model.rs) and belong to the selected dense entity;
-computed output or parameter IDs cannot substitute for input IDs. Input and
-output references must be full durable public IDs, even for originless rules;
-bare names are refused by this new interface. Two supplied names resolving to
-one input or output are rejected.
+[input catalog](../src/model.rs); computed output or parameter IDs cannot
+substitute for input IDs. The command admits a column's slot when the requested
+closure needs it or when the checked [interface](../src/interface.rs) lists it
+for the request's scope. For a filtered entity, the command uses the entity's
+underlying ID kind as that scope; a `Scalar` request keeps its own `Scalar` scope
+even when a derived relation declares an entity named `Scalar`. The interface collects read
+sites across formula versions, rule references and relation predicates, so the
+command can admit columns the requested closure does not read. The command still
+accepts every column the whole-root check accepted for a requested root kind,
+`Scalar` included. It validates and counts every admitted column against the
+request's limits, then ignores one that no requested output reads. Input and
+output references must be full durable public IDs, even for originless rules,
+and the command refuses bare names. It also refuses two supplied names that
+resolve to one input or output.
+
+When a request has several defects, the API reports the first one it finds.
+After it re-admits the artifact and runs the common request-shape and
+observation-period checks, it checks that the entity exists, then validates
+output IDs and duplicates in request order. It next validates v2's
+calculation-period name and period, then compiles the requested outputs and
+their dependencies in output order. So the API reports an unknown entity before
+any calculation-period error, and invalid or duplicate outputs before
+calculation-name errors and compile refusals. The former whole-root compile
+walked a `HashMap`, so when a request reaches several refusals, the API can now
+report a different one first. A request with a single defect, an unsupported
+construct its outputs reach, still gets the same refusal and message. The API
+still checks batch rows and cells after it compiles, so a reached compile
+refusal comes first. A refusal in a rule no requested output reaches no longer
+fires, so a request it used to refuse can now fail those later checks instead.
+For v2, the API checks that `output_period` equals `calculation_period` before
+the common path.
 
 Periods must be nonempty, ascending, non-overlapping, and of the same kind.
 Allowed kinds are `month`, `benefit_week`, `tax_year`, and `custom`; only `custom`
@@ -89,7 +120,8 @@ commencement fails. This restriction does not introduce separate determination
 date semantics or make pre-commencement histories executable under later law.
 Versioned or end-bounded derived formulas unsupported by the dense compiler
 remain unsupported. Every requested output must contain an over-periods
-reduction. Relation contexts are explicitly unsupported by JSON v1.
+reduction. JSON v1 refuses relation contexts only when a requested output reaches
+them.
 
 Success writes one `axiom-rules-engine/lifetime-response/v1` JSON object. It
 contains `engine_version`, integer `artifact_format_version`, `arithmetic`,
@@ -157,7 +189,8 @@ date expressions still fail. Historical series must use explicit data-year keys
 or supplied history inputs; parameter effective dates describe legal version
 selection in this mode. It does not implement mixed observation-law and
 calculation-law selection, knowledge-time assessment, statutory eligibility,
-partly completed history, missing-period inference, or relation contexts.
+partly completed history, or missing-period inference. A relation context reached
+by a requested output is refused.
 
 The public Rust `dense::CalculationLifetimePlan::from_artifact` re-admits the
 original artifact and prepares an immutable plan for an entity and calculation
@@ -169,14 +202,14 @@ date, including roots not requested in the output list.
 The `axiom-rules-engine/lifetime-response/v2` response echoes the observation
 periods and calculation period. Both `reference_period` and `output_period`
 equal the calculation period. Its `selected_versions` array identifies each
-compiled derived or parameter node by name, retained source ID (or null),
-original zero-based version index, and original effective bounds. Genuinely
-unversioned derived nodes have the explicit `unversioned_derived` kind and no
+derived or parameter node reached by the requested outputs by name, retained
+source ID (or null), original zero-based version index, and original effective
+bounds. Unversioned derived nodes have the explicit `unversioned_derived` kind and no
 invented version range. This is execution metadata, not legal proof or source
 admission. The existing error schema remains `lifetime-error/v1`.
 
-V1 callers and its dedicated parser retain their original behavior and reject
-v2 fields. Separate v2 request/response schemas are published by `emit-schemas`.
+V1 keeps its request schema and dedicated parser, which reject v2 fields.
+Separate v2 request/response schemas are published by `emit-schemas`.
 The encoder's existing companion-fixture adapter supports v1 only; v2 fixture
 transport requires a separate reviewed encoder extension. The synthetic tests
 in `tests/lifetime_calculation.rs` exercise the actual plan and CLI, including

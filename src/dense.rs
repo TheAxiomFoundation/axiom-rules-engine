@@ -1106,6 +1106,31 @@ impl CalculationLifetimePlan {
         validate_calculation_period(&calculation_period)?;
         let compiled =
             DenseCompiledProgram::prepare(program, Some(entity), Some(calculation_period.clone()))?;
+        Self::from_prepared(compiled, calculation_period)
+    }
+
+    /// Prepare only the requested outputs at the calculation date. The public
+    /// artifact constructor keeps its whole-entity compilation contract.
+    pub(crate) fn from_program_for_outputs(
+        program: &Program,
+        entity: &str,
+        calculation_period: Period,
+        outputs: &[String],
+    ) -> Result<Self, DenseCompileError> {
+        validate_calculation_period(&calculation_period)?;
+        let compiled = DenseCompiledProgram::prepare_for_outputs(
+            program,
+            Some(entity),
+            outputs,
+            Some(calculation_period.clone()),
+        )?;
+        Self::from_prepared(compiled, calculation_period)
+    }
+
+    fn from_prepared(
+        compiled: DenseCompiledProgram,
+        calculation_period: Period,
+    ) -> Result<Self, DenseCompileError> {
         if !compiled.relations.is_empty() {
             return Err(DenseCompileError::Unsupported(
                 "relation context in calculation lifetime execution".into(),
@@ -1378,6 +1403,16 @@ impl DenseCompiledProgram {
         entity: Option<&str>,
         outputs: &[String],
     ) -> Result<Self, DenseCompileError> {
+        Self::prepare_for_outputs(program, entity, outputs, None)
+    }
+
+    /// Requested closure with the same version selection as `prepare`.
+    fn prepare_for_outputs(
+        program: &Program,
+        entity: Option<&str>,
+        outputs: &[String],
+        calculation_period: Option<Period>,
+    ) -> Result<Self, DenseCompileError> {
         crate::relation_typing::check_program(program)
             .map_err(DenseCompileError::RelationTyping)?;
         if outputs.is_empty() {
@@ -1445,6 +1480,7 @@ impl DenseCompiledProgram {
         }
 
         let mut compiler = DenseCompiler::new(program, root_entity)?;
+        compiler.calculation_period = calculation_period;
         for rule in requested {
             compiler.compile_derived(&rule.name)?;
         }

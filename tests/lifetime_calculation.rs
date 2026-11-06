@@ -628,8 +628,10 @@ fn fixed_law_top_n_and_period_varying_counts_keep_distinct_semantics() {
 }
 
 #[test]
-fn all_entity_roots_remain_conservatively_selected_even_if_not_requested() {
-    let mut program = fixture().program;
+fn whole_plan_keeps_all_roots_while_wire_selects_only_requested_outputs() {
+    let baseline = fixture();
+    let expected = run(baseline.clone(), request(2026)).unwrap();
+    let mut program = baseline.program;
     let mut unused = program.derived[0].clone();
     unused.name = "future_total".into();
     unused.id = Some("us:statutes/99/1#future_total".into());
@@ -638,9 +640,19 @@ fn all_entity_roots_remain_conservatively_selected_even_if_not_requested() {
     program.derived.push(unused);
     let artifact = CompiledProgramArtifact::compile(program).unwrap();
     assert!(
-        run(artifact, request(2026))
+        CalculationLifetimePlan::from_artifact(&artifact, "Worker", year(2026))
             .unwrap_err()
+            .to_string()
             .contains("future_total")
+    );
+    let response = run(artifact, request(2026)).unwrap();
+    assert_eq!(response["outputs"], expected["outputs"]);
+    assert!(
+        response["selected_versions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|selected| selected["name"] != "future_total")
     );
 }
 

@@ -413,7 +413,7 @@
               "type": "null"
             }
           ],
-          "description": "The program's entity roster, input slots and relations. Execution\nnever reads it."
+          "description": "The program's entity roster, input slots and relations. Lifetime request\nadmission reads its input scopes."
         },
         "module": {
           "anyOf": [

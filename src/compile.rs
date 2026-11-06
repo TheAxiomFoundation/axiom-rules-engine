@@ -248,8 +248,8 @@ pub struct CompiledProgramArtifact {
     pub source_closure: Option<SourceClosure>,
     pub program: ProgramSpec,
     /// The program's entity roster, input slots and relations
-    /// ([`crate::interface`]), derived by every compile. Execution never
-    /// reads it.
+    /// ([`crate::interface`]), derived by every compile. Lifetime request
+    /// admission uses its input scopes; evaluators do not read it.
     pub interface: Option<ProgramInterface>,
     pub metadata: CompiledProgramMetadata,
     /// Compile-time warnings are intentionally not part of the executable
@@ -495,8 +495,8 @@ struct ArtifactProgramWire {
     /// two serialize in the same order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     input_declarations: Vec<crate::spec::InputDeclarationSpec>,
-    /// The program's entity roster, input slots and relations. Execution
-    /// never reads it.
+    /// The program's entity roster, input slots and relations. Lifetime request
+    /// admission reads its input scopes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     interface: Option<ProgramInterface>,
 }
