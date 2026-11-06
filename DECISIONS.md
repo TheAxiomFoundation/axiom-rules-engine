@@ -195,8 +195,9 @@ the top-N count could not express.
 **Consequences.**
 
 - v2 refuses relations a requested output reaches, Float input columns, inputs
-  no rule for the entity reads, and observations that do not end before the
-  calculation starts. A missing formula or table version at the calculation
+  outside the requested closure and the interface's admission scope, and
+  observations that do not end before the calculation starts. A missing formula
+  or table version at the calculation
   start is refused by name, with no fallback to an older version.
 - Commencement in a calculation plan is checked at the calculation start;
   v1 keeps main's per-rule check (#270).
