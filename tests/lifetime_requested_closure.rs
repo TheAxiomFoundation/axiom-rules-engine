@@ -119,6 +119,69 @@ fn scalar_fixture() -> CompiledProgramArtifact {
     )
 }
 
+/// The unrelated relation maps its filtered `Scalar` entity to Worker IDs.
+/// Rule interface scopes must nevertheless preserve Scalar's own inputs.
+fn scalar_alias_fixture() -> CompiledProgramArtifact {
+    compiled(
+        r#"format: rulespec/v1
+rules:
+  - name: member_of_worker
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Worker]
+  - name: scalar_members
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_worker
+      entity: Scalar
+      member_relation: members
+      slot_entities: [Person, Worker]
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2000-01-01'
+        formula: member_of_worker
+  - name: unrelated
+    kind: derived
+    entity: Scalar
+    dtype: Money
+    effective_from: '2000-01-01'
+    formula: extra
+  - name: total
+    kind: derived
+    entity: Scalar
+    dtype: Money
+    effective_from: '2000-01-01'
+    formula: sum_over_periods(7)
+"#,
+    )
+}
+
+fn assert_scalar_alias_column_admitted(calculation: bool) {
+    let mut body = request(calculation);
+    body["entity"] = json!("Scalar");
+    for batch in body["batches"].as_array_mut().unwrap() {
+        *batch = json!({
+            "row_count":1,
+            "entity_ids":["scalar"],
+            "inputs":{
+                "us:policies/fixture/lifetime#input.extra":{
+                    "kind":"decimal", "values":["100"]
+                }
+            }
+        });
+    }
+    let result = run_body(scalar_alias_fixture(), &body).unwrap_or_else(|error| {
+        panic!("previously accepted Scalar extra column, calculation {calculation}: {error:?}")
+    });
+    assert_eq!(
+        result["outputs"][TOTAL]["column"],
+        json!({"kind":"decimal","values":["14"]})
+    );
+}
+
 /// `total` reads only `amount`. Each other input belongs to a rule it does not
 /// reach: `unit_amount` to a filtered entity of Worker's kind, `person_amount`
 /// to a Person rule a Worker rule reads directly, and `lone_person_amount` to
@@ -263,6 +326,16 @@ fn a_scalar_output_no_rule_of_the_entity_reaches_runs() {
             "calculation {calculation}"
         );
     }
+}
+
+#[test]
+fn legacy_admits_scalar_input_despite_an_unrelated_filtered_entity_alias() {
+    assert_scalar_alias_column_admitted(false);
+}
+
+#[test]
+fn calculation_admits_scalar_input_despite_an_unrelated_filtered_entity_alias() {
+    assert_scalar_alias_column_admitted(true);
 }
 
 #[test]

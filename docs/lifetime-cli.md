@@ -51,13 +51,37 @@ Every batch must contain the same unique, nonempty string `entity_ids` in the
 same order. Each input column length equals `row_count`. These IDs declare row
 alignment; the engine does not authenticate identity or infer links. Zero rows
 remain zero rows. Input names must appear in the artifact's
-[input catalog](../src/model.rs), and its [interface](../src/interface.rs) must
-list them for the kind of the selected entity; computed output or parameter IDs
-cannot substitute for input IDs. The command counts every accepted column against
-the request's limits and ignores one that no requested output reads. Input and
-output references must be full durable public IDs, even for originless rules;
-bare names are refused by this new interface. Two supplied names resolving to
-one input or output are rejected.
+[input catalog](../src/model.rs); computed output or parameter IDs cannot
+substitute for input IDs. The command admits a column's slot when the requested
+closure needs it or when the checked [interface](../src/interface.rs) lists it
+for the request's scope. For a filtered entity, the command uses the entity's
+underlying ID kind as that scope; a `Scalar` request keeps its own `Scalar` scope
+even when a derived relation declares an entity named `Scalar`. The interface collects read
+sites across formula versions, rule references and relation predicates, so the
+command can admit columns the requested closure does not read. The command still
+accepts every column the whole-root check accepted for a requested root kind,
+`Scalar` included. It validates and counts every admitted column against the
+request's limits, then ignores one that no requested output reads. Input and
+output references must be full durable public IDs, even for originless rules,
+and the command refuses bare names. It also refuses two supplied names that
+resolve to one input or output.
+
+When a request has several defects, the API reports the first one it finds.
+After it re-admits the artifact and runs the common request-shape and
+observation-period checks, it checks that the entity exists, then validates
+output IDs and duplicates in request order. It next validates v2's
+calculation-period name and period, then compiles the requested outputs and
+their dependencies in output order. So the API reports an unknown entity before
+any calculation-period error, and invalid or duplicate outputs before
+calculation-name errors and compile refusals. The former whole-root compile
+walked a `HashMap`, so when a request reaches several refusals, the API can now
+report a different one first. A request with a single defect, an unsupported
+construct its outputs reach, still gets the same refusal and message. The API
+still checks batch rows and cells after it compiles, so a reached compile
+refusal comes first. A refusal in a rule no requested output reaches no longer
+fires, so a request it used to refuse can now fail those later checks instead.
+For v2, the API checks that `output_period` equals `calculation_period` before
+the common path.
 
 Periods must be nonempty, ascending, non-overlapping, and of the same kind.
 Allowed kinds are `month`, `benefit_week`, `tax_year`, and `custom`; only `custom`

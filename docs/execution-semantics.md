@@ -417,6 +417,14 @@ the derived rules and parameters those outputs reach. The public Rust
 `CalculationLifetimePlan::from_artifact` still compiles every rule of the entity
 and its dependencies, including rules the execution's output list leaves out.
 
+When a request has several defects, the API may now report an output error or a
+different reached compile refusal first, and it still checks batch rows and cells
+after it compiles. A request with a single defect, an unsupported construct its
+outputs reach, still gets the same refusal and message. See the
+[lifetime CLI contract](lifetime-cli.md) for the full validation order and the
+input-admission rule, including the interface's relation-predicate scopes and the
+separate `Scalar` scope.
+
 In an output that reduces over periods, a relation aggregation outside
 the reduction has no period to read and fails with `LifetimeAmbiguousLeaf`,
 which names it.

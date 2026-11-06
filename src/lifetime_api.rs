@@ -637,7 +637,13 @@ fn execute_lifetime_internal(
     // roots. Keep admitting those columns using the checked artifact interface,
     // without compiling the roots, then pass only needed columns to the plan.
     let entity_kinds = crate::relation_typing::filtered_entity_kinds(&program);
-    let root_kind = entity_kinds.get(&request.entity).unwrap_or(&request.entity);
+    // Match interface::rule_kinds: Scalar keeps its own scope even when a
+    // derived relation declares a filtered entity with that name.
+    let root_kind = if request.entity == SCALAR_ENTITY {
+        &request.entity
+    } else {
+        entity_kinds.get(&request.entity).unwrap_or(&request.entity)
+    };
     let mut root_inputs = needed_inputs.clone();
     root_inputs.extend(
         artifact

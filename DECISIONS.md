@@ -20,24 +20,40 @@ version selection.
 
 **Consequences.**
 
-- Dense still refuses a rule a requested output reaches, with the same error
-  and message, and a request the API accepted before returns the same outputs
+- Dense keeps the refusal and message for a request with a single defect, an
+  unsupported construct a requested output reaches. When a request has several
+  defects, the API may report an earlier validation error or a different reached
+  refusal first. A request the API accepted before returns the same outputs
   (`tests/lifetime_requested_closure_properties.rs`).
 - A request may name any `Scalar` rule as an output. The whole-root compile
   listed only the `Scalar` rules a root rule reaches, so the API used to answer
   "unknown public output" for any other.
-- A request that names an unknown output gets that error even when another of
-  its outputs reaches a rule dense refuses. It used to get the compile refusal.
+- After it re-admits the artifact and runs the common request-shape and
+  observation-period checks, the API checks that the entity exists, validates
+  outputs in request order, then validates v2's calculation-period name and
+  period and compiles. So it reports an unknown entity before any
+  calculation-period error, and invalid or duplicate outputs before
+  calculation-name errors and compile refusals. It compiles in output order,
+  following each output's dependencies, where the former whole-root preparation
+  walked a `HashMap`, so a request that reaches several refusals can get a
+  different one first. The API still checks batch rows and cells after it
+  compiles, so a reached compile refusal comes first. A refusal in a rule no
+  requested output reaches no longer fires, so a request it used to refuse can
+  now fail those later checks instead. For v2, the API still checks that
+  `output_period` equals `calculation_period` before the common path.
 - The API refuses an entity no rule belongs to with `UnknownEntity` itself, since
   a closure of `Scalar` rules would otherwise run for an entity the program never
   mentions.
-- The API accepts a column when the artifact's interface lists that input for
-  the kind of the request's entity, and gives the plan only the columns the
-  closure reads. Every column the whole-root check accepted stays accepted. Three
-  more now pass and go unread: one that only a filtered entity's rule of that
-  kind reads, one that only an out-of-force formula version reads, and one that
-  another entity's rule reads on behalf of a rule of this kind. The API still
-  refuses a column no rule of the kind reads.
+- A supplied public input must resolve through the artifact's input catalog.
+  The API admits its slot when the closure needs it or the checked interface
+  lists it for the request's scope: the entity's underlying ID kind for a
+  filtered entity, and `Scalar` itself for a `Scalar` request. The interface
+  derives input scopes from read sites across formula versions, rule references
+  and relation predicates, whether or not the requested closure reaches them.
+  The API still accepts every column the whole-root check accepted for a
+  requested root kind, `Scalar` included. It validates and counts every admitted
+  column against request limits, then gives the plan only the columns the
+  closure reads.
 - v2's `selected_versions` lists only the rules and parameters the outputs reach.
 
 ## 2026-11-03 — Formula and input errors name what the user wrote
