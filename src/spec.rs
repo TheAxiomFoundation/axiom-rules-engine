@@ -54,6 +54,20 @@ pub enum SpecError {
         id: String,
         names: String,
     },
+    /// A parameter whose cells a lookup or direct query cannot read as
+    /// declared. Compiled RuleSpec never has one; raw IR or an artifact that
+    /// skipped the compiler can.
+    #[error("[parameter_key_shape] parameter `{parameter}` {problem}")]
+    ParameterKeyShape { parameter: String, problem: String },
+    /// One query reference names a parameter and a derived rule.
+    #[error(
+        "[parameter_derived_collision] `{reference}` names parameter `{parameter}` and derived rule `{derived}`; a query output naming it resolves to the derived rule, so the parameter could not be queried. Rename one"
+    )]
+    ParameterDerivedCollision {
+        reference: String,
+        parameter: String,
+        derived: String,
+    },
     #[error(
         "dataset input `{reference}` must use an absolute legal RuleSpec reference that resolves to an input slot in the compiled program; use a request name from the input catalog"
     )]
@@ -335,6 +349,8 @@ impl ProgramSpec {
                 .iter()
                 .map(|derived| (derived.id.as_deref(), derived.name.as_str())),
         )?;
+        reject_parameter_derived_collisions(&self.parameters, &self.derived)?;
+        reject_malformed_parameter_keys(&self.parameters)?;
 
         if !program.selected_year_inputs.is_empty() {
             let catalog = program.input_catalog();
@@ -409,6 +425,95 @@ fn reject_duplicate_public_ids<'a>(
         }
         None => Ok(()),
     }
+}
+
+/// Refuse a query reference that names both a parameter and a derived rule:
+/// one's name or public id equal to the other's. Explain and fast resolve an
+/// output to a derived rule before a parameter, so the parameter could never
+/// be queried, and dense, which answers derived rules only, would agree with
+/// them only by accident. RuleSpec refuses such declarations before lowering
+/// (`declaration_name_clash`); raw IR and artifacts are checked here.
+fn reject_parameter_derived_collisions(
+    parameters: &[IndexedParameterSpec],
+    derived: &[DerivedSpec],
+) -> Result<(), SpecError> {
+    let mut rules_by_reference = BTreeMap::<&str, &str>::new();
+    for rule in derived {
+        for reference in std::iter::once(rule.name.as_str()).chain(rule.id.as_deref()) {
+            rules_by_reference
+                .entry(reference)
+                .or_insert(rule.name.as_str());
+        }
+    }
+    let collision = parameters
+        .iter()
+        .flat_map(|parameter| {
+            std::iter::once(parameter.name.as_str())
+                .chain(parameter.id.as_deref())
+                .filter_map(|reference| {
+                    rules_by_reference
+                        .get(reference)
+                        .map(|rule| (reference, parameter.name.as_str(), *rule))
+                })
+        })
+        .min();
+    match collision {
+        Some((reference, parameter, derived)) => Err(SpecError::ParameterDerivedCollision {
+            reference: reference.to_string(),
+            parameter: parameter.to_string(),
+            derived: derived.to_string(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Refuse a parameter whose cells do not have the shape lookups and direct
+/// queries rely on: at least one version, at least one value in each
+/// version, and, for a parameter without `indexed_by`, exactly key 0 in each
+/// version. A direct query reads a non-indexed parameter's key 0, so another
+/// key would be ignored without an error. Compiled RuleSpec always has this
+/// shape; raw IR and artifacts can skip the compiler, so loading checks it.
+fn reject_malformed_parameter_keys(parameters: &[IndexedParameterSpec]) -> Result<(), SpecError> {
+    for parameter in parameters {
+        let problem = if parameter.versions.is_empty() {
+            Some("declares no version, so every read of it fails".to_string())
+        } else if let Some(version) = parameter
+            .versions
+            .iter()
+            .find(|version| version.values.is_empty())
+        {
+            Some(format!(
+                "has no value in its version effective from {}, so every read in that version fails",
+                version.effective_from
+            ))
+        } else if parameter.indexed_by.is_none() {
+            parameter
+                .versions
+                .iter()
+                .find(|version| !version.values.keys().eq([0].iter()))
+                .map(|version| {
+                    let keys = version
+                        .values
+                        .keys()
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "declares no `indexed_by` but holds keys {keys} in its version effective from {}; a parameter without `indexed_by` holds one value per version, under key 0. Declare `indexed_by` for a table, or keep only key 0",
+                        version.effective_from
+                    )
+                })
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            return Err(SpecError::ParameterKeyShape {
+                parameter: parameter.name.clone(),
+                problem,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Options for binding a wire [`DatasetSpec`] to a compiled [`Program`].

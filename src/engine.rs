@@ -1423,10 +1423,34 @@ impl<'a> Engine<'a> {
         Ok(value)
     }
 
+    /// Every cached instance at `period` whose entity is `root_entity_id`,
+    /// with what those instances reach. One query's trace roots at its own
+    /// outputs instead ([`Self::evaluated_trace_instances_from`]).
+    #[cfg(test)]
     pub(crate) fn evaluated_trace_instances(
         &self,
         period: &Period,
         root_entity_id: &str,
+    ) -> Vec<EvaluatedTraceInstance> {
+        let roots = self
+            .scalar_cache
+            .keys()
+            .chain(self.judgment_cache.keys())
+            .filter(|key| key.period == *period && key.entity_id == root_entity_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        self.evaluated_trace_instances_from(period, &roots)
+    }
+
+    /// The cached instances at `period` that `roots` reach through recorded
+    /// dependencies: the nodes a query's outputs evaluated, whether this
+    /// query or an earlier one of the same request put them in the cache. A
+    /// node another query evaluated and these roots do not reach is left out,
+    /// so a query's trace is the trace it has when it runs alone (#163).
+    pub(crate) fn evaluated_trace_instances_from(
+        &self,
+        period: &Period,
+        roots: &[CacheKey],
     ) -> Vec<EvaluatedTraceInstance> {
         let mut instances = Vec::with_capacity(self.scalar_cache.len() + self.judgment_cache.len());
         for (key, value) in &self.scalar_cache {
@@ -1453,11 +1477,7 @@ impl<'a> Engine<'a> {
             });
         }
         let mut reachable = HashSet::new();
-        let mut pending: Vec<_> = instances
-            .iter()
-            .filter(|instance| instance.key.entity_id == root_entity_id)
-            .map(|instance| instance.key.clone())
-            .collect();
+        let mut pending = roots.to_vec();
         while let Some(key) = pending.pop() {
             if !reachable.insert(key.clone()) {
                 continue;
@@ -2958,17 +2978,31 @@ impl<'a> Engine<'a> {
         name: &str,
         period: &Period,
     ) -> Result<ScalarValue, EvalError> {
-        let indexed_by = {
+        let (indexed, keyed) = {
             let parameter = self
                 .program
                 .parameters
                 .get(name)
                 .ok_or_else(|| EvalError::UnknownParameter(name.to_string()))?;
-            parameter.indexed_by.clone()
+            (
+                parameter.indexed_by.is_some(),
+                parameter
+                    .versions
+                    .iter()
+                    .any(|version| version.values.keys().any(|key| *key != 0)),
+            )
         };
-        if indexed_by.is_some() {
+        if indexed {
             return Err(EvalError::TypeMismatch(format!(
                 "parameter `{name}` is indexed; query it through a derived rule"
+            )));
+        }
+        // Loading refuses this shape (`spec::reject_malformed_parameter_keys`);
+        // a `Program` built in Rust skips loading, so the query checks too
+        // rather than return key 0 and drop the other cells.
+        if keyed {
+            return Err(EvalError::TypeMismatch(format!(
+                "parameter `{name}` declares no `indexed_by` but holds keys other than 0; query it through a derived rule"
             )));
         }
         self.lookup_parameter(name, 0, period)
@@ -4367,7 +4401,7 @@ mod relation_resolution_tests {
                 .collect::<Vec<_>>();
             let program = json!({
                 "relations": relations,
-                "parameters": [{"name": "rate", "unit": null, "versions": [
+                "parameters": [{"name": "rate", "unit": null, "indexed_by": "key", "versions": [
                     {"effective_from": "2026-01-01", "values": {"0": {"kind": "integer", "value": 2}, "1": {"kind": "integer", "value": 0}}}
                 ]}],
                 "derived": derived,
@@ -4491,6 +4525,81 @@ mod relation_resolution_tests {
             engine.maximum_depth,
             engine.path_coverage,
         )
+    }
+
+    /// A query's trace roots at its own outputs (#163), so a request's later
+    /// queries do not inherit what earlier ones cached. For a query that runs
+    /// alone that must keep the trace rooting at the query's entity gave: on
+    /// a fresh engine, every instance evaluated for the entity is one the
+    /// outputs reach. Relation-heavy programs (derived relations, `exists`,
+    /// paths) are where a read could be evaluated without being recorded as
+    /// a dependency.
+    #[test]
+    fn a_lone_query_trace_rooted_at_its_outputs_matches_the_entity_trace() {
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 512,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[163; 32]),
+        );
+        let compared = std::cell::Cell::new(0_usize);
+        runner
+            .run(&case(), |(program, dataset)| {
+                let model = program.to_program().expect("the program lowers");
+                let data = dataset.to_dataset().expect("a valid raw dataset");
+                let period = Period::month(2026, 1);
+                let render = |instances: Vec<super::EvaluatedTraceInstance>| {
+                    let mut rendered = instances
+                        .iter()
+                        .map(|instance| format!("{instance:?}"))
+                        .collect::<Vec<_>>();
+                    rendered.sort();
+                    rendered
+                };
+                for household in HOUSEHOLDS {
+                    for outputs in [&["h0"][..], &["h1"], &["h2"], &["h0", "h1", "h2"]] {
+                        let mut engine = Engine::new(&model, &data);
+                        let mut roots = Vec::new();
+                        let mut failed = false;
+                        for rule in outputs {
+                            let result = match model.derived[*rule].dtype {
+                                DType::Judgment => engine
+                                    .evaluate_judgment(rule, household, &period)
+                                    .map(|_| ()),
+                                _ => engine.evaluate_scalar(rule, household, &period).map(|_| ()),
+                            };
+                            failed |= result.is_err();
+                            roots.push(super::CacheKey {
+                                derived: (*rule).to_string(),
+                                entity_id: household.to_string(),
+                                period: period.clone(),
+                            });
+                        }
+                        // A failed evaluation fails the request, which then
+                        // returns no trace.
+                        if failed {
+                            continue;
+                        }
+                        compared.set(compared.get() + 1);
+                        prop_assert_eq!(
+                            render(engine.evaluated_trace_instances_from(&period, &roots)),
+                            render(engine.evaluated_trace_instances(&period, household)),
+                            "{} {:?}",
+                            household,
+                            outputs
+                        );
+                    }
+                }
+                Ok(())
+            })
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        assert!(
+            compared.get() >= 1000,
+            "{} lone queries compared",
+            compared.get()
+        );
     }
 
     #[test]
