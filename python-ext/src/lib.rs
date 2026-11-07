@@ -48,7 +48,7 @@ impl From<&DenseRelationSchema> for RelationSchemaHandle {
 
 /// Authoring-level metadata for one derived rule: what the RuleSpec module
 /// declared, before lowering to the runtime model (which drops `period`).
-/// Adapters (e.g. populace's RulesEngine adapter) resolve variables through
+/// Adapters (e.g. Microcosm's RulesEngine adapter) resolve variables through
 /// this instead of re-parsing YAML.
 #[pyclass(module = "axiom_rules_engine_dense")]
 #[derive(Clone)]
