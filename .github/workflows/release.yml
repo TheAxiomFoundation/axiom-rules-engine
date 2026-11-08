@@ -12,12 +12,15 @@
 #   against a pinned digest, and fail on any other runner (#114)
 # - run Cleanup under bash with set -euo pipefail, and strip the blank lines from
 #   the published .sha256 files (#122)
+# - call build-python-wheels.yml (custom-build-python-wheels) without the
+#   `secrets: inherit` dist writes for a custom job; the workflow reads no secret
 # Finding 3 (tag ruleset) is a repository-settings change and is intentionally not handled here.
 # MANUAL CHANGE — re-apply after every `dist init` regeneration:
 # - the concurrency block above `jobs:`, a copy of the one in ci.yml, which
 #   cancels a pull request's older run
 # dist regenerates this file only after someone removes "ci" from allow-dirty in
-# dist-workspace.toml.
+# dist-workspace.toml. A regeneration writes the custom-build-python-wheels job
+# itself, from `global-artifacts-jobs` and `github-custom-job-permissions` there.
 #
 # Copyright 2022-2024, axodotdev
 # SPDX-License-Identifier: MIT or Apache-2.0
@@ -307,14 +310,30 @@ jobs:
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
+
+  # The Python wheels (build-python-wheels.yml): the dense extension for
+  # CPython 3.13 and 3.14 on Linux x86_64, and the wrapper. Their uploads are
+  # named artifacts-python-*, so the host job attaches them to the release.
+  custom-build-python-wheels:
+    needs:
+      - plan
+      - build-local-artifacts
+    uses: ./.github/workflows/build-python-wheels.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
   # Determines if we should publish/announce
   host:
     needs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
+      - custom-build-python-wheels
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-build-python-wheels.result == 'skipped' || needs.custom-build-python-wheels.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

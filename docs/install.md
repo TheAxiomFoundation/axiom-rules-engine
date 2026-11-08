@@ -79,6 +79,55 @@ cargo run -- compile-composed \
   --output compiled.json
 ```
 
+## Install the Python wheels from a release
+
+A release also carries the Python packages as wheels, so a deployment can
+install them without a Rust toolchain. Releases tagged before
+`.github/workflows/build-python-wheels.yml` existed carry none.
+
+| Wheel | What it holds |
+| --- | --- |
+| `axiom_rules_engine_dense-<version>-cp313-cp313-manylinux_2_34_x86_64.whl` | The dense extension for CPython 3.13 |
+| `axiom_rules_engine_dense-<version>-cp314-cp314-manylinux_2_34_x86_64.whl` | The dense extension for CPython 3.14 |
+| `axiom_rules_engine-<version>-py3-none-any.whl` | The Python wrapper, `axiom_rules_engine` |
+
+The extension wheels need Linux on x86_64 with glibc 2.34 or later. Their
+`<version>` and the wrapper's are the engine's, the version in the tag. Each
+wheel has a `.sha256` file and a build-provenance attestation, as the
+archives do:
+
+```sh
+tag="vX.Y.Z"
+wheel="axiom_rules_engine_dense-${tag#v}-cp313-cp313-manylinux_2_34_x86_64.whl"
+
+gh release download "$tag" \
+  --repo TheAxiomFoundation/axiom-rules-engine \
+  --pattern "$wheel" \
+  --pattern "$wheel.sha256"
+sha256sum --check "$wheel.sha256"
+gh attestation verify "$wheel" \
+  --repo TheAxiomFoundation/axiom-rules-engine \
+  --source-ref "refs/tags/$tag"
+```
+
+To pin the wheels in a requirements file, give each wheel's release URL with
+its checksum. pip then refuses a file whose bytes differ:
+
+```text
+axiom-rules-engine-dense @ https://github.com/TheAxiomFoundation/axiom-rules-engine/releases/download/vX.Y.Z/axiom_rules_engine_dense-X.Y.Z-cp313-cp313-manylinux_2_34_x86_64.whl#sha256=<checksum from the .sha256 file>
+axiom-rules-engine @ https://github.com/TheAxiomFoundation/axiom-rules-engine/releases/download/vX.Y.Z/axiom_rules_engine-X.Y.Z-py3-none-any.whl#sha256=<checksum from the .sha256 file>
+```
+
+Install the extension and the wrapper from the same release. Dense execution
+(`CompiledDenseProgram`) needs only these two wheels. The wrapper's
+`AxiomRulesEngine`, `load_program` and `load_composed_program` also run the
+CLI: take it from the same release's
+`axiom-rules-engine-x86_64-unknown-linux-gnu.tar.xz` and pass it as
+`binary_path`. Compile the artifacts that `from_artifact_file` loads with
+that CLI too. Loading a format-3 artifact re-derives its metadata and
+interface and refuses one that differs, so a CLI from another release can
+write artifacts the extension won't load.
+
 ## Artifact provenance
 
 [Artifact releases](https://github.com/TheAxiomFoundation/axiom-rules-engine/releases)

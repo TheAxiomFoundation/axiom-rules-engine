@@ -16,6 +16,13 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-da
 checksum = "sha256"
 # Whether to enable GitHub Attestations
 github-attestations = true
+# build-python-wheels.yml builds the Python wheels (the dense extension for
+# CPython 3.13 and 3.14 on Linux x86_64, and the wrapper) that the release
+# attaches beside the CLI archives. release.yml calls it as
+# custom-build-python-wheels. Its attest job needs the OIDC token to attest
+# the wheels, as the build jobs attest the archives.
+global-artifacts-jobs = ["./build-python-wheels"]
+github-custom-job-permissions = { "build-python-wheels" = { attestations = "write", contents = "read", id-token = "write" } }
 # release.yml carries hand edits that regenerating it would drop: the security
 # patches and the concurrency block that release.yml lists at its top.
 # allow-dirty stops dist from checking or regenerating release.yml, so those
