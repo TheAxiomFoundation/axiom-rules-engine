@@ -331,8 +331,10 @@ opt in to the legacy path.
 
 From a checkout with the current stable Rust toolchain and
 [uv](https://docs.astral.sh/uv/), these commands build the dense extension as
-a CPython 3.14 wheel and install it with the wrapper. CI's
-`PyO3 extension wheel (Linux)` job builds and installs the wheel the same way.
+a CPython 3.14 wheel and install it with the wrapper. The package supports
+Python 3.13 and 3.14; for a 3.13 wheel, create the environment with
+`--python 3.13`. CI's `PyO3 extension wheel (Linux, 3.13)` and
+`(Linux, 3.14)` jobs build and install the wheels the same way.
 The commands create `.venv`, so run them in a checkout that has none yet:
 
 ```bash
@@ -343,8 +345,9 @@ uv pip install --python .venv/bin/python maturin==1.14.1
 uv pip install --python .venv/bin/python ./python dist/axiom_rules_engine_dense-*.whl
 ```
 
-Every push to `main` and every pull request into it uploads that wheel and
+Every push to `main` and every pull request into it uploads both wheels and
 the release `axiom-rules-engine` binary as workflow artifacts, named
+`axiom-rules-engine-dense-wheel-cp313-linux-x86_64-<sha>`,
 `axiom-rules-engine-dense-wheel-cp314-linux-x86_64-<sha>` and
 `axiom-rules-engine-cli-linux-x86_64-<sha>` after the commit the run built.
 On a pull request that commit is GitHub's merge commit, not the branch head.
