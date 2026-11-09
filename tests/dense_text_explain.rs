@@ -122,7 +122,7 @@ fn program(rules: Vec<Value>, chosen: Value) -> Value {
             },
         ],
         "parameters": [
-            { "name": "t", "unit": null, "versions": [{ "effective_from": "2000-01-01", "values": {
+            { "name": "t", "unit": null, "indexed_by": "key", "versions": [{ "effective_from": "2000-01-01", "values": {
                 "0": { "kind": "text", "value": texts[1] },
                 "1": { "kind": "text", "value": texts[3] },
                 "2": { "kind": "text", "value": texts[5] },

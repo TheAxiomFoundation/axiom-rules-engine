@@ -602,7 +602,7 @@ fn an_extremum_types_its_losing_members_as_numbers() {
             {"name":"members","arity":2,"slot_entities":["Person","Household"]},
             {"name":"links","arity":2,"slot_entities":["Household","Household"]}
         ],
-        "parameters": [{"name":"table","unit":null,"versions":[{"effective_from":"2020-01-01",
+        "parameters": [{"name":"table","unit":null,"indexed_by":"rank","versions":[{"effective_from":"2020-01-01",
             "values":{"1":{"kind":"integer","value":10}}}]}],
         "derived": [
             scalar_rule("least", "Household", lookup(related("extreme_related", "members", 1, "rank"))),
@@ -721,7 +721,7 @@ fn an_aggregates_where_clause_is_read_at_each_member() {
             {"name":"members","arity":2,"slot_entities":["Person","Household"]},
             {"name":"links","arity":2,"slot_entities":["Household","Household"]}
         ],
-        "parameters": [{"name":"table","unit":null,"versions":[{"effective_from":"2020-01-01",
+        "parameters": [{"name":"table","unit":null,"indexed_by":"rank","versions":[{"effective_from":"2020-01-01",
             "values":{"1":{"kind":"integer","value":10}}}]}],
         "derived": [
             scalar_rule("lowest", "Household",
@@ -823,7 +823,7 @@ fn a_read_through_a_term_at_a_parameter_index_lists_its_keys() {
             }}
         ],
         "parameters": [{
-            "name": "band_of_age", "unit": null,
+            "name": "band_of_age", "unit": null, "indexed_by": "band_age",
             "versions": [{"effective_from": "2020-01-01", "values": {
                 "12": {"kind": "integer", "value": 1},
                 "30": {"kind": "integer", "value": 2},
