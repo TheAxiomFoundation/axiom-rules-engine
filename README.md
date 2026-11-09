@@ -177,7 +177,7 @@ For a build whose commit is unknown, the response has this shape:
 {
   "artifact_format_version": 3,
   "capabilities": ["relation_entity_typing", "related_min_max_only", "artifact_interface", "relation_roles", "lifetime_calculation"],
-  "engine_version": "0.2.2",
+  "engine_version": "0.0.0",
   "engine_build": { "commit": null, "dirty": null },
   "legacy_artifact_formats": [2]
 }
