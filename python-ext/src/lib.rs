@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
-use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
+use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact, EngineBuild};
 use axiom_rules_engine::dense::{
     DenseBatchSpec, DenseColumn, DenseCompiledProgram, DenseRelationBatchSpec, DenseRelationKey,
     DenseRelationSchema,
@@ -504,11 +504,32 @@ fn split_lifetime_batch<'py>(batch: &Bound<'py, PyAny>) -> PyResult<LifetimeBatc
     Ok((inputs, relations, items.get(2).cloned()))
 }
 
+/// The build this extension's engine was compiled from, as a compiled
+/// artifact records it in `engine_build` (`docs/artifact-format.md`):
+/// `{"commit": <40 lowercase hex digits> | None, "dirty": bool | None}`.
+/// `commit` is None when the build could not know it, and `dirty` is None
+/// whenever `commit` is.
+#[pyfunction]
+fn engine_build(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
+    let build = EngineBuild::current();
+    let stamp = PyDict::new(py);
+    stamp.set_item("commit", build.commit)?;
+    stamp.set_item("dirty", build.dirty)?;
+    Ok(stamp)
+}
+
 #[pymodule]
 fn axiom_rules_engine_dense(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CompiledDenseProgramHandle>()?;
     module.add_class::<RelationSchemaHandle>()?;
     module.add_class::<DerivedMetadataHandle>()?;
+    // This extension's own version (python-ext/Cargo.toml), which its wheel's
+    // file name and installed metadata carry.
+    module.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    // The version of the engine crate linked into it. A release keeps the two
+    // equal (python/tests/test_package_versions.py).
+    module.add("ENGINE_VERSION", axiom_rules_engine::ENGINE_VERSION)?;
+    module.add_function(wrap_pyfunction!(engine_build, module)?)?;
     Ok(())
 }
 
