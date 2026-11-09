@@ -327,6 +327,15 @@ and `SourceClosure` models; `LegacyCompiledProgramV2` models format 2.
 Pass `accept_artifact_format=2` to the client or dense artifact loader to
 opt in to the legacy path.
 
+Releases carry the dense extension as CPython 3.13 and 3.14 wheels for Linux
+x86_64, and the wrapper as a pure-Python wheel, each with a checksum and a
+build-provenance attestation. See
+[Install the Python wheels from a release](docs/install.md#install-the-python-wheels-from-a-release).
+The extension, the wrapper and the engine carry one version, and a version
+cut bumps `Cargo.toml`, `python-ext/Cargo.toml` (with `python-ext/Cargo.lock`)
+and `python/pyproject.toml` together; `python/tests/test_package_versions.py`
+fails when they differ.
+
 ### Build on Linux and use the CI binaries
 
 From a checkout with the current stable Rust toolchain and

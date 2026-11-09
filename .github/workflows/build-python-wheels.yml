@@ -1,0 +1,238 @@
+name: Python wheels
+
+# Builds the Python wheels a release carries:
+#
+# - the dense extension (`axiom_rules_engine_dense`, python-ext/) for CPython
+#   3.13 and 3.14 on Linux x86_64;
+# - the pure-Python wrapper (`axiom_rules_engine`, python/).
+#
+# release.yml calls this workflow as a dist custom job when a version tag is
+# pushed (`global-artifacts-jobs` in dist-workspace.toml). Every upload's name
+# starts with `artifacts-`, so release.yml's host job attaches the wheels and
+# their .sha256 files to the GitHub Release beside the CLI archives. A
+# deployment can then pin a wheel by its release URL and hash, with no Rust
+# toolchain. See docs/install.md.
+#
+# A pull request that changes this file, release.yml, dist-workspace.toml or
+# a version the wheels carry runs it too, without the attestation, so the
+# release path is tested before a tag depends on it. ci.yml's
+# `PyO3 extension wheel (Linux, ...)` jobs build the extension wheels on every
+# pull request.
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: dist's plan for the release, which dist passes to every custom job. Unused.
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/build-python-wheels.yml"
+      - ".github/workflows/release.yml"
+      - "dist-workspace.toml"
+      - "Cargo.toml"
+      - "python-ext/Cargo.toml"
+      - "python/pyproject.toml"
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels that pull request's older run of this
+# workflow. A run that release.yml calls keys its own group, so nothing
+# cancels it or makes it wait. The group starts with a fixed name because in
+# a called workflow `github.workflow` names the caller, and a called run must
+# not share release.yml's own group.
+concurrency:
+  group: python-wheels-${{ github.event_name == 'pull_request' && !inputs.plan && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && !inputs.plan }}
+
+jobs:
+  # maturin builds on the runner and tags the extension wheel with the oldest
+  # manylinux policy its glibc symbols allow: manylinux_2_34 on Ubuntu 24.04,
+  # as in ci.yml's wheel job, which names ubuntu-24.04 for the same reason.
+  wheels:
+    name: Python wheel (Linux, ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.13"
+            tag: cp313
+          - python: "3.14"
+            tag: cp314
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            python-ext
+            .
+
+      # The wheels' file names carry the dense extension's and the wrapper's
+      # versions, which must be the engine's (python/tests/test_package_versions.py).
+      # On a tag, the engine's version must also be the tag's, which dist checks
+      # for the CLI too.
+      - name: Check the versions
+        id: version
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          read_version() {
+            python -c 'import sys, tomllib; data = tomllib.load(open(sys.argv[1], "rb")); print(data[sys.argv[2]]["version"])' "$1" "$2"
+          }
+          engine=$(read_version Cargo.toml package)
+          dense=$(read_version python-ext/Cargo.toml package)
+          wrapper=$(read_version python/pyproject.toml project)
+          echo "engine ${engine}, dense extension ${dense}, wrapper ${wrapper}"
+          if [ "$dense" != "$engine" ] || [ "$wrapper" != "$engine" ]; then
+            echo "python-ext/Cargo.toml and python/pyproject.toml must carry the engine's version ${engine}" >&2
+            exit 1
+          fi
+          if [ "$REF_TYPE" = "tag" ]; then
+            tag_version="${REF_NAME##*/}"
+            tag_version="${tag_version#v}"
+            if [ "$tag_version" != "$engine" ]; then
+              echo "tag ${REF_NAME} names version ${tag_version}, but the engine is ${engine}" >&2
+              exit 1
+            fi
+          fi
+          echo "version=${engine}" >> "$GITHUB_OUTPUT"
+
+      - name: Build the wheels
+        run: |
+          uv venv --python ${{ matrix.python }} .venv
+          uv pip install --python .venv/bin/python maturin==1.14.1
+          .venv/bin/maturin build --release --locked \
+            --manifest-path python-ext/Cargo.toml \
+            --interpreter .venv/bin/python --out dist
+          uv build --wheel --python .venv/bin/python --out-dir dist python
+
+      # One wheel of each, named for this version and interpreter, and nothing
+      # else in dist/, so the uploads below take exactly these files.
+      - name: Check the wheels' names
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PY_TAG: ${{ matrix.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dense=(dist/axiom_rules_engine_dense-"${VERSION}"-"${PY_TAG}"-"${PY_TAG}"-manylinux_*_x86_64.whl)
+          wrapper=(dist/axiom_rules_engine-"${VERSION}"-py3-none-any.whl)
+          all=(dist/*)
+          ls -l dist
+          if [ "${#dense[@]}" -ne 1 ] || [ "${#wrapper[@]}" -ne 1 ] || [ "${#all[@]}" -ne 2 ]; then
+            echo "expected one ${PY_TAG} manylinux x86_64 extension wheel and one wrapper wheel, both version ${VERSION}" >&2
+            exit 1
+          fi
+
+      # Hypothesis runs the property tests, which skip without it.
+      - name: Install the wheels
+        run: >-
+          uv pip install --python .venv/bin/python
+          dist/*.whl pytest hypothesis==6.170.14
+
+      # The tests below must exercise the installed wheels, not the checkout.
+      - name: Check both packages import from site-packages
+        run: |
+          .venv/bin/python - <<'PY'
+          import sysconfig
+          from pathlib import Path
+
+          import axiom_rules_engine
+          import axiom_rules_engine_dense
+
+          site_packages = Path(sysconfig.get_path("platlib")).resolve()
+          for module in (axiom_rules_engine, axiom_rules_engine_dense):
+              path = Path(module.__file__).resolve()
+              print(module.__name__, path)
+              assert path.is_relative_to(site_packages), path
+          PY
+
+      # The end-to-end tests compile and run programs with
+      # target/debug/axiom-rules-engine, as in ci.yml's Python jobs.
+      - name: Build the engine binary for the end-to-end tests
+        run: cargo build --locked --bin axiom-rules-engine
+
+      - name: Run the Python tests against the installed wheels
+        run: .venv/bin/python -m pytest -q python/tests
+
+      # One line per file, in the format `sha256sum --check` reads from the
+      # directory the wheel is in.
+      - name: Write the checksums
+        working-directory: dist
+        run: |
+          for wheel in *.whl; do
+            sha256sum "$wheel" > "$wheel.sha256"
+          done
+          cat ./*.sha256
+
+      - name: Upload the extension wheel
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: artifacts-python-wheel-${{ matrix.tag }}-linux-x86_64
+          path: |
+            dist/axiom_rules_engine_dense-*.whl
+            dist/axiom_rules_engine_dense-*.whl.sha256
+          if-no-files-found: error
+
+      # The wrapper is pure Python, so one leg uploads it.
+      - name: Upload the wrapper wheel
+        if: matrix.python == '3.14'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: artifacts-python-wrapper-wheel
+          path: |
+            dist/axiom_rules_engine-*-py3-none-any.whl
+            dist/axiom_rules_engine-*-py3-none-any.whl.sha256
+          if-no-files-found: error
+
+  # Attests the wheels the jobs above built, as release.yml attests the CLI
+  # archives, so `gh attestation verify` checks a downloaded wheel. Only a run
+  # for a tag attests. This job runs no code from the checkout, so the build
+  # jobs never hold the OIDC token.
+  attest:
+    name: Attest the Python wheels
+    needs: wheels
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Download the wheels
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: artifacts-python-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Attest
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: "dist/*.whl"
