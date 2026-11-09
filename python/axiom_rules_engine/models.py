@@ -370,6 +370,9 @@ class QueryResult(BaseModel):
     assessment_date: date | None = None
     outputs: dict[str, OutputValue]
     trace: dict[str, DerivedTraceNode] = Field(default_factory=dict)
+    # Rule values at other entity instances: rule key -> entity id -> node.
+    # Explain mode only; the engine omits it when empty.
+    instance_trace: dict[str, dict[str, DerivedTraceNode]] = Field(default_factory=dict)
 
 
 class ExecutionMetadata(BaseModel):

@@ -153,7 +153,9 @@ fn run(
 fn without_trace(response: &ExecutionResponse) -> serde_json::Value {
     let mut results = serde_json::to_value(&response.results).expect("results serialise");
     for result in results.as_array_mut().expect("array") {
-        result.as_object_mut().expect("object").remove("trace");
+        let result = result.as_object_mut().expect("object");
+        result.remove("trace");
+        result.remove("instance_trace");
     }
     results
 }
