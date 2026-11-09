@@ -80,6 +80,14 @@ pub enum ExecutionMode {
 pub struct ExecutionQuery {
     pub entity_id: String,
     pub period: PeriodSpec,
+    /// Rules and parameters to answer at `entity_id`. A member output is a
+    /// rule whose entity differs from the one kind the input records give
+    /// `entity_id` (a `Person` rule asked at a `Household` id with household
+    /// records). It is evaluated at every id the dataset gives the rule's
+    /// kind, in explain mode, and its values are in `instance_trace`, not in
+    /// `outputs`. A member missing an input is left out, and any other error
+    /// fails the request. When no member answers, the output keeps its
+    /// ordinary meaning and is evaluated at `entity_id`.
     pub outputs: Vec<String>,
     /// Decision/assessment time: the date the determination is made, as
     /// opposed to `period`, which is valid time — the benefit period the law
@@ -125,6 +133,13 @@ pub struct QueryResult {
     pub outputs: BTreeMap<String, OutputValue>,
     #[serde(default)]
     pub trace: BTreeMap<String, DerivedTraceNode>,
+    /// Rule values at entity instances other than the query's own: public
+    /// rule key -> entity id -> node. It holds the member instances `trace`
+    /// reached (each also in `trace`, under its `@entity:` key) and the
+    /// instances a member output was evaluated at (see the query's
+    /// `outputs`). Explain mode only; omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub instance_trace: BTreeMap<String, BTreeMap<String, DerivedTraceNode>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -324,7 +339,8 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
     // A request can carry a raw program that never went through the compiler
     // or the artifact loader, so it faces the same mandatory relation typing.
     crate::relation_typing::check_program(&program).map_err(ApiError::RelationTyping)?;
-    let query_entities = query_entity_kinds(&program, &request.queries);
+    let members = MemberOutputs::find(&program, &request.dataset, &request.queries);
+    let query_entities = query_entity_kinds(&program, &request.queries, &members);
     let relation_binding = request.relation_binding;
     let outcome = request.dataset.to_dataset_for_queries_with_options(
         &program,
@@ -351,6 +367,7 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
             &program,
             &dataset,
             request.queries,
+            &members,
             ExecutionMetadata {
                 relation_binding: Some(relation_binding),
                 requested_mode: ExecutionMode::Explain,
@@ -379,7 +396,17 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
                 &dataset
             };
 
-            match crate::bulk::try_execute(&program, fast_dataset, &request.queries)? {
+            // Bulk answers each output at its query's id only; a member
+            // output is answered at other ids, which only Explain does.
+            let fast = match members.first_member_output() {
+                Some(output) => crate::bulk::FastPathResult::Unsupported {
+                    reason: format!(
+                        "output `{output}` is a member rule, evaluated at each member instance, which only explain mode does"
+                    ),
+                },
+                None => crate::bulk::try_execute(&program, fast_dataset, &request.queries)?,
+            };
+            match fast {
                 crate::bulk::FastPathResult::Executed(response) => {
                     Ok(response.with_metadata(ExecutionMetadata {
                         relation_binding: Some(relation_binding),
@@ -394,6 +421,7 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
                     // outside the bulk query period for temporal expressions.
                     &dataset,
                     request.queries,
+                    &members,
                     ExecutionMetadata {
                         relation_binding: Some(relation_binding),
                         requested_mode: ExecutionMode::Fast,
@@ -440,14 +468,19 @@ fn with_request_input_name(error: ApiError, program: &crate::model::Program) -> 
 
 /// Each query evaluates its output rules on its `entity_id`, so that id has
 /// each rule's entity kind. Entity-free (`Scalar`) rules and parameters say
-/// nothing about the id.
+/// nothing about the id, and neither does a member output, which is
+/// evaluated at other ids.
 fn query_entity_kinds(
     program: &crate::model::Program,
     queries: &[ExecutionQuery],
+    members: &MemberOutputs,
 ) -> Vec<(String, String)> {
     let mut kinds = std::collections::BTreeSet::new();
-    for query in queries {
+    for (position, query) in queries.iter().enumerate() {
         for output in &query.outputs {
+            if members.entity_of(position, output).is_some() {
+                continue;
+            }
             let Some(derived) = program
                 .resolve_derived_name(output)
                 .and_then(|name| program.derived.get(&name))
@@ -460,6 +493,137 @@ fn query_entity_kinds(
         }
     }
     kinds.into_iter().collect()
+}
+
+/// The member outputs of a request (see [`ExecutionQuery::outputs`]) and the
+/// ids each is evaluated at.
+///
+/// A query id's kind comes from its input records only, the evidence that
+/// binding also trusts (`relation_slot_entity_diagnostics`): a filtered
+/// entity (a derived relation's `entity`, such as `SnapUnit`) counts as its
+/// source kind, and an id given two kinds has none. Relation tuples are what
+/// binding checks against that evidence, so they never type a query's id:
+/// a tuple in the wrong order is still refused, because the member output
+/// takes no evidence away that binding would use. An output is a member
+/// output only when its query's id has one kind and the rule's kind is
+/// another; a rule of the id's own kind, an id with no input records and an
+/// ambiguous id all keep the ordinary meaning, so the rule is evaluated at
+/// the query's id.
+///
+/// A member output is evaluated at every id of its kind, from the input
+/// records and the relation slots both, so a member with no facts of its own
+/// is still found (and left out when its rule needs one). When no member
+/// answers, `execute_explain` evaluates the output at the query's id after
+/// all, so a request that fails without member outputs still fails.
+struct MemberOutputs {
+    /// Per query position: output reference -> the rule's canonical kind.
+    by_query: Vec<BTreeMap<String, String>>,
+    /// Canonical kind -> the ids the dataset gives that kind alone, sorted.
+    ids_by_kind: BTreeMap<String, Vec<String>>,
+}
+
+/// Record that the dataset gives `entity_id` the kind `entity`; an id given
+/// two kinds has none.
+fn note_kind(kinds: &mut BTreeMap<String, Option<String>>, entity_id: &str, entity: String) {
+    kinds
+        .entry(entity_id.to_string())
+        .and_modify(|known| {
+            if known.as_deref() != Some(entity.as_str()) {
+                *known = None;
+            }
+        })
+        .or_insert(Some(entity));
+}
+
+impl MemberOutputs {
+    fn find(
+        program: &crate::model::Program,
+        dataset: &DatasetSpec,
+        queries: &[ExecutionQuery],
+    ) -> Self {
+        let slot_kinds = crate::relation_typing::EffectiveSlotEntities::new(program);
+        let filtered_kinds =
+            crate::relation_typing::filtered_entity_kinds_with(program, &slot_kinds);
+        let canonical = |entity: &str| {
+            filtered_kinds
+                .get(entity)
+                .cloned()
+                .unwrap_or_else(|| entity.to_string())
+        };
+
+        let mut input_kinds = BTreeMap::<String, Option<String>>::new();
+        for input in &dataset.inputs {
+            note_kind(&mut input_kinds, &input.entity_id, canonical(&input.entity));
+        }
+        let mut kind_by_id = input_kinds.clone();
+        for record in &dataset.relations {
+            let Some(slots) = program
+                .resolve_relation_name(&record.name)
+                .and_then(|name| slot_kinds.get(&name))
+            else {
+                continue;
+            };
+            for (entity_id, entity) in record.tuple.iter().zip(slots) {
+                note_kind(&mut kind_by_id, entity_id, canonical(entity));
+            }
+        }
+
+        let by_query = queries
+            .iter()
+            .map(|query| {
+                let Some(Some(id_kind)) = input_kinds.get(&query.entity_id) else {
+                    return BTreeMap::new();
+                };
+                query
+                    .outputs
+                    .iter()
+                    .filter_map(|output| {
+                        let derived = program
+                            .resolve_derived_name(output)
+                            .and_then(|name| program.derived.get(&name))?;
+                        if derived.entity == crate::model::SCALAR_ENTITY {
+                            return None;
+                        }
+                        let rule_kind = canonical(&derived.entity);
+                        (rule_kind != *id_kind).then(|| (output.clone(), rule_kind))
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let mut ids_by_kind = BTreeMap::<String, Vec<String>>::new();
+        for (entity_id, kind) in kind_by_id {
+            if let Some(kind) = kind {
+                ids_by_kind.entry(kind).or_default().push(entity_id);
+            }
+        }
+        Self {
+            by_query,
+            ids_by_kind,
+        }
+    }
+
+    /// The canonical kind of `output` when it is a member output of the
+    /// query at `position`.
+    fn entity_of(&self, position: usize, output: &str) -> Option<&str> {
+        self.by_query
+            .get(position)
+            .and_then(|outputs| outputs.get(output))
+            .map(String::as_str)
+    }
+
+    /// The ids a member output of `kind` is evaluated at.
+    fn ids_of(&self, kind: &str) -> &[String] {
+        self.ids_by_kind.get(kind).map_or(&[], Vec::as_slice)
+    }
+
+    fn first_member_output(&self) -> Option<&str> {
+        self.by_query
+            .iter()
+            .flat_map(|outputs| outputs.keys())
+            .next()
+            .map(String::as_str)
+    }
 }
 
 pub fn execute_compiled_request(
@@ -562,14 +726,17 @@ fn execute_explain(
     program: &crate::model::Program,
     dataset: &crate::model::DataSet,
     queries: Vec<ExecutionQuery>,
+    members: &MemberOutputs,
     metadata: ExecutionMetadata,
 ) -> Result<ExecutionResponse, ApiError> {
     let mut engine = Engine::new(&program, &dataset);
     let mut results = Vec::with_capacity(queries.len());
 
-    for query in queries {
+    for (position, query) in queries.into_iter().enumerate() {
         let period = query.period.to_model()?;
         let mut outputs = BTreeMap::new();
+        // (rule, entity id) pairs a member output was evaluated at.
+        let mut member_instances = Vec::new();
 
         for output_reference in &query.outputs {
             let Some(output_name) = program.resolve_derived_name(output_reference) else {
@@ -618,6 +785,36 @@ fn execute_explain(
                     at: period.start,
                 }
             })?;
+            if let Some(kind) = members.entity_of(position, output_reference) {
+                let mut answered = false;
+                for entity_id in members.ids_of(kind) {
+                    let evaluated = match semantics {
+                        DerivedSemantics::Scalar(_) => engine
+                            .evaluate_scalar(&output_name, entity_id, &period)
+                            .map(|_| ()),
+                        DerivedSemantics::Judgment(_) => engine
+                            .evaluate_judgment(&output_name, entity_id, &period)
+                            .map(|_| ()),
+                    };
+                    match evaluated {
+                        Ok(()) => {
+                            member_instances.push((output_name.clone(), entity_id.clone()));
+                            answered = true;
+                        }
+                        // A member without the facts its rule reads has no
+                        // value; the other members still answer.
+                        Err(EvalError::MissingInput { .. }) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                if answered {
+                    continue;
+                }
+                // No member answered, so the output keeps its ordinary
+                // meaning below: a request that member reading cannot answer
+                // (an input record naming the wrong entity, say) fails as it
+                // did before, rather than succeeding with no value.
+            }
             match semantics {
                 DerivedSemantics::Scalar(_) => {
                     let value = engine.evaluate_scalar(&output_name, &query.entity_id, &period)?;
@@ -652,7 +849,13 @@ fn execute_explain(
             }
         }
 
-        let trace = collect_trace(program, &engine, &query.entity_id, &period);
+        let (trace, instance_trace) = collect_trace(
+            program,
+            &engine,
+            &query.entity_id,
+            &period,
+            &member_instances,
+        );
 
         results.push(QueryResult {
             entity_id: query.entity_id,
@@ -660,147 +863,195 @@ fn execute_explain(
             assessment_date: query.assessment_date,
             outputs,
             trace,
+            instance_trace,
         });
     }
 
     Ok(ExecutionResponse { metadata, results })
 }
 
+type InstanceTrace = BTreeMap<String, BTreeMap<String, DerivedTraceNode>>;
+
+/// A query's trace, every instance its outputs reached, and its
+/// per-instance view (`QueryResult::instance_trace`): the reached instances
+/// at other ids, plus each `(rule, entity id)` a member output was evaluated
+/// at.
 fn collect_trace(
     program: &crate::model::Program,
     engine: &Engine,
     entity_id: &str,
     period: &crate::model::Period,
-) -> BTreeMap<String, DerivedTraceNode> {
+    member_instances: &[(String, String)],
+) -> (BTreeMap<String, DerivedTraceNode>, InstanceTrace) {
     let mut trace = BTreeMap::new();
+    let mut instance_trace = InstanceTrace::new();
     let mut instances = engine.evaluated_trace_instances(period, entity_id);
     instances.sort_by(|left, right| {
         (&left.key.derived, &left.key.entity_id).cmp(&(&right.key.derived, &right.key.entity_id))
     });
 
-    for instance in instances {
-        let Some(derived) = program.derived.get(&instance.key.derived) else {
+    for instance in &instances {
+        let Some(node) = trace_node(program, instance, entity_id, period) else {
             continue;
         };
-        let Some(semantics) = derived.semantics_at(period) else {
-            continue;
-        };
-        let trace_key = trace_instance_key(program, &instance.key, entity_id);
-        let dependencies = instance
-            .execution
-            .dependencies
-            .iter()
-            .map(|dependency| trace_instance_key(program, dependency, entity_id))
-            .collect();
-        let not_evaluated_dependencies = instance
-            .execution
-            .not_evaluated_dependencies
-            .iter()
-            .map(|dependency| match dependency {
-                crate::engine::SkippedTraceDependency::Derived { key, reason } => {
-                    NotEvaluatedDependency {
-                        dependency: trace_instance_key(program, key, entity_id),
-                        reason: trace_skip_reason(*reason),
-                    }
-                }
-                crate::engine::SkippedTraceDependency::Parameter { parameter, reason } => {
-                    NotEvaluatedDependency {
-                        dependency: public_parameter_key(program, parameter),
-                        reason: trace_skip_reason(*reason),
-                    }
-                }
-            })
-            .collect();
-        let parameter_reads = instance
-            .execution
-            .parameter_reads
-            .iter()
-            .map(|read| {
-                let parameter = program
-                    .parameters
-                    .get(&read.parameter)
-                    .expect("an evaluated parameter remains in the program");
-                TraceParameterRead {
-                    parameter: public_parameter_key(program, &read.parameter),
-                    name: parameter.name.clone(),
-                    id: parameter.id.clone(),
-                    index: read.index,
-                    value: ScalarValueSpec::from_model(read.value.clone()),
-                    unit: parameter.unit.clone(),
-                    effective_from: read.effective_from,
-                    effective_to: read.effective_to,
-                    source: parameter.source.clone(),
-                    source_url: parameter.source_url.clone(),
-                }
-            })
-            .collect();
-
-        let selected_year_reads = instance
-            .execution
-            .selected_year_reads
-            .iter()
-            .map(|read| TraceSelectedYearRead {
-                input: read.input.clone(),
-                entity_id: read.entity_id.clone(),
-                selected_start: read.selected_period.start,
-                selected_end: read.selected_period.end,
-                value: ScalarValueSpec::from_model(read.value.clone()),
-            })
-            .collect();
-        let node = match (&instance.value, semantics) {
-            (
-                crate::engine::EvaluatedTraceValue::Scalar {
-                    value,
-                    pre_rounding_value,
-                },
-                DerivedSemantics::Scalar(expr),
-            ) => DerivedTraceNode::Scalar {
-                name: derived.name.clone(),
-                id: derived.id.clone(),
-                entity_id: instance.key.entity_id.clone(),
-                dtype: DTypeSpec::from_model(&derived.dtype),
-                unit: derived.unit.clone(),
-                value: ScalarValueSpec::from_model(value.clone()),
-                rounding: derived
-                    .rounding
-                    .map(|rounding| RoundingModeSpec::from_model(rounding.mode)),
-                pre_rounding_value: pre_rounding_value.clone().map(ScalarValueSpec::from_model),
-                source: derived.source.clone(),
-                source_url: derived.source_url.clone(),
-                executed_expression: format_scalar_expression(program, expr),
-                parameter_reads,
-                selected_year_reads,
-                dependencies,
-                not_evaluated_dependencies,
-            },
-            (
-                crate::engine::EvaluatedTraceValue::Judgment(outcome),
-                DerivedSemantics::Judgment(expr),
-            ) => DerivedTraceNode::Judgment {
-                name: derived.name.clone(),
-                id: derived.id.clone(),
-                entity_id: instance.key.entity_id.clone(),
-                unit: derived.unit.clone(),
-                outcome: match outcome {
-                    JudgmentOutcome::Holds => JudgmentOutcomeSpec::Holds,
-                    JudgmentOutcome::NotHolds => JudgmentOutcomeSpec::NotHolds,
-                    JudgmentOutcome::Undetermined => JudgmentOutcomeSpec::Undetermined,
-                },
-                source: derived.source.clone(),
-                source_url: derived.source_url.clone(),
-                executed_expression: format_judgment_expression(program, expr),
-                parameter_reads,
-                selected_year_reads,
-                dependencies,
-                not_evaluated_dependencies,
-            },
-            // A cache entry and its selected semantics are created together;
-            // a type mismatch here would indicate internal corruption.
-            _ => continue,
-        };
-        trace.insert(trace_key, node);
+        if instance.key.entity_id != entity_id {
+            instance_trace
+                .entry(program.public_derived_key(&instance.key.derived))
+                .or_default()
+                .insert(instance.key.entity_id.clone(), node.clone());
+        }
+        trace.insert(trace_instance_key(program, &instance.key, entity_id), node);
     }
-    trace
+
+    // The query's id reaches a member output's instances only when one of
+    // its own outputs reads them, so each is read from the evaluations
+    // rooted at its member.
+    for (rule, member_id) in member_instances {
+        let public = program.public_derived_key(rule);
+        if instance_trace
+            .get(&public)
+            .is_some_and(|nodes| nodes.contains_key(member_id))
+        {
+            continue;
+        }
+        let node = engine
+            .evaluated_trace_instances(period, member_id)
+            .iter()
+            .find(|instance| instance.key.derived == *rule && instance.key.entity_id == *member_id)
+            .and_then(|instance| trace_node(program, instance, entity_id, period));
+        if let Some(node) = node {
+            instance_trace
+                .entry(public)
+                .or_default()
+                .insert(member_id.clone(), node);
+        }
+    }
+    (trace, instance_trace)
+}
+
+/// One evaluated instance as a trace node, its dependencies keyed the way
+/// the trace of the query at `entity_id` keys them.
+fn trace_node(
+    program: &crate::model::Program,
+    instance: &crate::engine::EvaluatedTraceInstance,
+    entity_id: &str,
+    period: &crate::model::Period,
+) -> Option<DerivedTraceNode> {
+    let derived = program.derived.get(&instance.key.derived)?;
+    let semantics = derived.semantics_at(period)?;
+    let dependencies = instance
+        .execution
+        .dependencies
+        .iter()
+        .map(|dependency| trace_instance_key(program, dependency, entity_id))
+        .collect();
+    let not_evaluated_dependencies = instance
+        .execution
+        .not_evaluated_dependencies
+        .iter()
+        .map(|dependency| match dependency {
+            crate::engine::SkippedTraceDependency::Derived { key, reason } => {
+                NotEvaluatedDependency {
+                    dependency: trace_instance_key(program, key, entity_id),
+                    reason: trace_skip_reason(*reason),
+                }
+            }
+            crate::engine::SkippedTraceDependency::Parameter { parameter, reason } => {
+                NotEvaluatedDependency {
+                    dependency: public_parameter_key(program, parameter),
+                    reason: trace_skip_reason(*reason),
+                }
+            }
+        })
+        .collect();
+    let parameter_reads = instance
+        .execution
+        .parameter_reads
+        .iter()
+        .map(|read| {
+            let parameter = program
+                .parameters
+                .get(&read.parameter)
+                .expect("an evaluated parameter remains in the program");
+            TraceParameterRead {
+                parameter: public_parameter_key(program, &read.parameter),
+                name: parameter.name.clone(),
+                id: parameter.id.clone(),
+                index: read.index,
+                value: ScalarValueSpec::from_model(read.value.clone()),
+                unit: parameter.unit.clone(),
+                effective_from: read.effective_from,
+                effective_to: read.effective_to,
+                source: parameter.source.clone(),
+                source_url: parameter.source_url.clone(),
+            }
+        })
+        .collect();
+
+    let selected_year_reads = instance
+        .execution
+        .selected_year_reads
+        .iter()
+        .map(|read| TraceSelectedYearRead {
+            input: read.input.clone(),
+            entity_id: read.entity_id.clone(),
+            selected_start: read.selected_period.start,
+            selected_end: read.selected_period.end,
+            value: ScalarValueSpec::from_model(read.value.clone()),
+        })
+        .collect();
+    let node = match (&instance.value, semantics) {
+        (
+            crate::engine::EvaluatedTraceValue::Scalar {
+                value,
+                pre_rounding_value,
+            },
+            DerivedSemantics::Scalar(expr),
+        ) => DerivedTraceNode::Scalar {
+            name: derived.name.clone(),
+            id: derived.id.clone(),
+            entity_id: instance.key.entity_id.clone(),
+            dtype: DTypeSpec::from_model(&derived.dtype),
+            unit: derived.unit.clone(),
+            value: ScalarValueSpec::from_model(value.clone()),
+            rounding: derived
+                .rounding
+                .map(|rounding| RoundingModeSpec::from_model(rounding.mode)),
+            pre_rounding_value: pre_rounding_value.clone().map(ScalarValueSpec::from_model),
+            source: derived.source.clone(),
+            source_url: derived.source_url.clone(),
+            executed_expression: format_scalar_expression(program, expr),
+            parameter_reads,
+            selected_year_reads,
+            dependencies,
+            not_evaluated_dependencies,
+        },
+        (
+            crate::engine::EvaluatedTraceValue::Judgment(outcome),
+            DerivedSemantics::Judgment(expr),
+        ) => DerivedTraceNode::Judgment {
+            name: derived.name.clone(),
+            id: derived.id.clone(),
+            entity_id: instance.key.entity_id.clone(),
+            unit: derived.unit.clone(),
+            outcome: match outcome {
+                JudgmentOutcome::Holds => JudgmentOutcomeSpec::Holds,
+                JudgmentOutcome::NotHolds => JudgmentOutcomeSpec::NotHolds,
+                JudgmentOutcome::Undetermined => JudgmentOutcomeSpec::Undetermined,
+            },
+            source: derived.source.clone(),
+            source_url: derived.source_url.clone(),
+            executed_expression: format_judgment_expression(program, expr),
+            parameter_reads,
+            selected_year_reads,
+            dependencies,
+            not_evaluated_dependencies,
+        },
+        // A cache entry and its selected semantics are created together;
+        // a type mismatch here would indicate internal corruption.
+        _ => return None,
+    };
+    Some(node)
 }
 
 fn trace_skip_reason(reason: crate::engine::TraceSkipReason) -> NotEvaluatedReason {

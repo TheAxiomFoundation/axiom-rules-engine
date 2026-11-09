@@ -40,6 +40,7 @@
           "type": "string"
         },
         "outputs": {
+          "description": "Rules and parameters to answer at `entity_id`. A member output is a\nrule whose entity differs from the one kind the input records give\n`entity_id` (a `Person` rule asked at a `Household` id with household\nrecords). It is evaluated at every id the dataset gives the rule's\nkind, in explain mode, and its values are in `instance_trace`, not in\n`outputs`. A member missing an input is left out, and any other error\nfails the request. When no member answers, the output keeps its\nordinary meaning and is evaluated at `entity_id`.",
           "items": {
             "type": "string"
           },
