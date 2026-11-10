@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn version_line_uses_package_version() {
-        assert_eq!(version_line(), "axiom-rules-engine 0.0.0");
+        assert_eq!(version_line(), "axiom-rules-engine 0.3.0");
     }
 
     /// Registration is the sole command-name inventory: recognition and rendered help
