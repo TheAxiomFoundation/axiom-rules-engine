@@ -232,6 +232,55 @@ dependencies. Thus expansion as a disjunction preserves values and failures,
 while the wholly skipped and empty
 domain cases have distinct trace rules.
 
+### Parameters in the trace
+
+A parameter is not a rule, so it has no node in `trace` or `instance_trace`
+and never appears in `dependencies`. Instead, each trace node lists the
+parameter cells its rule read in `parameter_reads`. The list is in order of
+first read, holds each distinct cell once, and is omitted when the rule read
+no parameter. The read belongs to the rule whose formula made it: a rule that
+only aggregates a member rule lists nothing, and the member rule's node lists
+the read at every member instance, in `trace` (under its `@entity:` key) and
+in `instance_trace`.
+
+One entry is one resolved cell, never a whole table:
+
+| Field | Meaning |
+|---|---|
+| `parameter` | Public identity: the parameter's `id` when it has one, otherwise its name. The same key `executed_expression` and a skipped parameter in `not_evaluated_dependencies` use. |
+| `name`, `id` | The parameter's name, and its durable id (omitted when it has none). |
+| `indexed_by` | What a table is keyed by, as declared. Omitted for a non-indexed parameter. |
+| `index` | The integer key the rule's index expression evaluated to for this instance. `0` for a non-indexed parameter. |
+| `value` | The cell at `index`, as a tagged scalar value. |
+| `unit` | The parameter's unit; omitted when it has none. |
+| `effective_from`, `effective_to` | The dates of the version that applied: the version in force at the query period's start. `effective_to` is omitted for an open-ended version. |
+| `source`, `source_url` | The parameter's citation, when it declares one. |
+
+A household of three reading `maximum_allotment[household_size]` in January
+2026 reports:
+
+```json
+"parameter_reads": [
+  {
+    "parameter": "maximum_allotment",
+    "name": "maximum_allotment",
+    "indexed_by": "household_size",
+    "index": 3,
+    "value": { "kind": "integer", "value": 785 },
+    "unit": "USD",
+    "effective_from": "2025-10-01"
+  }
+]
+```
+
+A consumer tells the three kinds of leaf apart by where they are: a rule is
+a key of `trace`, a parameter is an entry of a node's `parameter_reads`, and
+an input is neither (its name appears only in `executed_expression`; a
+selected-year input also appears in `selected_year_reads`). A parameter
+requested directly as a query output is answered in `outputs` and has no
+trace node. `tests/trace_parameter_reads.rs` checks a scalar read, a table
+read and a member rule's read.
+
 ## Fast mode contract
 
 For every request, fast returns exactly what explain returns, except that
