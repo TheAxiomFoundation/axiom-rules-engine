@@ -401,6 +401,8 @@ pub fn try_execute(
             assessment_date: query.assessment_date,
             outputs,
             trace: BTreeMap::new(),
+            // Fast mode keeps no trace; member outputs run in explain mode.
+            instance_trace: BTreeMap::new(),
         });
     }
 

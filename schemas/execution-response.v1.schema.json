@@ -435,6 +435,16 @@
         "entity_id": {
           "type": "string"
         },
+        "instance_trace": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "$ref": "#/$defs/DerivedTraceNode"
+            },
+            "type": "object"
+          },
+          "description": "Rule values at entity instances other than the query's own: public\nrule key -> entity id -> node. It holds the member instances `trace`\nreached (each also in `trace`, under its `@entity:` key) and the\ninstances a member output was evaluated at (see the query's\n`outputs`). Explain mode only; omitted when empty.",
+          "type": "object"
+        },
         "outputs": {
           "additionalProperties": {
             "$ref": "#/$defs/OutputValue"

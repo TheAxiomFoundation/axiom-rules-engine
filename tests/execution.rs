@@ -1903,15 +1903,15 @@ fn date_arithmetic_case(flags: &[bool]) -> (ProgramSpec, DatasetSpec, Vec<Execut
     )
 }
 
-/// A response's results as JSON with the explain-only trace removed, for
-/// comparing a fast response against an explain response exactly.
+/// A response's results as JSON with the explain-only traces (`trace` and
+/// its per-instance view) removed, for comparing a fast response against an
+/// explain response exactly.
 fn results_without_trace(response: &ExecutionResponse) -> serde_json::Value {
     let mut results = serde_json::to_value(&response.results).expect("results serialise");
     for result in results.as_array_mut().expect("results are an array") {
-        result
-            .as_object_mut()
-            .expect("each result is an object")
-            .remove("trace");
+        let result = result.as_object_mut().expect("each result is an object");
+        result.remove("trace");
+        result.remove("instance_trace");
     }
     results
 }
@@ -5767,4 +5767,344 @@ fn fast_reports_explains_value_kind_under_every_declared_dtype() {
             "no {kind} value was reported under dtype {dtype}: {kinds_seen:?}"
         );
     }
+}
+
+/// Two people in one household: `person_income` reads each person's
+/// `income`, and `household_income` sums it over `member_of_household`. The
+/// household's own `size` record gives `household-1` its kind.
+fn member_household_case(outputs: &[&str]) -> (ProgramSpec, DatasetSpec, Vec<ExecutionQuery>) {
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date"),
+        end: chrono::NaiveDate::from_ymd_opt(2026, 1, 31).expect("valid date"),
+    };
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    let rule = |name: &str, entity: &str, expr: ScalarExprSpec| DerivedSpec {
+        id: None,
+        name: name.to_string(),
+        entity: entity.to_string(),
+        dtype: DTypeSpec::Decimal,
+        unit: None,
+        rounding: None,
+        source: None,
+        period: None,
+        source_url: None,
+        corpus_citation_path: None,
+        semantics: DerivedSemanticsSpec::Scalar { expr },
+        versions: vec![],
+    };
+    let program = ProgramSpec {
+        relations: vec![axiom_rules_engine::spec::RelationSpec {
+            name: "member_of_household".to_string(),
+            arity: 2,
+            slot_entities: vec!["Person".to_string(), "Household".to_string()],
+            derivation: None,
+        }],
+        derived: vec![
+            rule(
+                "person_income",
+                "Person",
+                ScalarExprSpec::Input {
+                    name: "income".to_string(),
+                },
+            ),
+            rule(
+                "household_size",
+                "Household",
+                ScalarExprSpec::Input {
+                    name: "size".to_string(),
+                },
+            ),
+            rule(
+                "household_income",
+                "Household",
+                ScalarExprSpec::SumRelated {
+                    relation: "member_of_household".to_string(),
+                    current_slot: 1,
+                    related_slot: 0,
+                    value: RelatedValueRefSpec::Derived {
+                        name: "person_income".to_string(),
+                    },
+                    where_clause: None,
+                },
+            ),
+        ],
+        ..ProgramSpec::default()
+    };
+    let person = |id: &str, income: &str| InputRecordSpec {
+        name: "income".to_string(),
+        entity: "Person".to_string(),
+        entity_id: id.to_string(),
+        interval: interval.clone(),
+        value: decimal_value(income),
+    };
+    let member = |id: &str| RelationRecordSpec {
+        name: "member_of_household".to_string(),
+        tuple: vec![id.to_string(), "household-1".to_string()],
+        interval: interval.clone(),
+    };
+    let household = InputRecordSpec {
+        name: "size".to_string(),
+        entity: "Household".to_string(),
+        entity_id: "household-1".to_string(),
+        interval: interval.clone(),
+        value: decimal_value("2"),
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            household,
+            person("person-1", "100"),
+            person("person-2", "50"),
+        ],
+        relations: vec![member("person-1"), member("person-2")],
+    };
+    let queries = vec![ExecutionQuery {
+        assessment_date: None,
+        entity_id: "household-1".to_string(),
+        period,
+        outputs: outputs.iter().map(|output| output.to_string()).collect(),
+    }];
+    (program, dataset, queries)
+}
+
+fn explain(
+    program: ProgramSpec,
+    dataset: DatasetSpec,
+    queries: Vec<ExecutionQuery>,
+) -> Result<ExecutionResponse, ApiError> {
+    execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
+        mode: ExecutionMode::Explain,
+        program,
+        dataset,
+        queries,
+    })
+}
+
+fn instance_value(
+    result: &axiom_rules_engine::api::QueryResult,
+    rule: &str,
+    entity_id: &str,
+) -> serde_json::Value {
+    let node = result
+        .instance_trace
+        .get(rule)
+        .unwrap_or_else(|| panic!("{rule} has an instance trace: {:?}", result.instance_trace))
+        .get(entity_id)
+        .unwrap_or_else(|| panic!("{rule} is traced at {entity_id}"));
+    serde_json::to_value(node).expect("node serialises")["value"]["value"].clone()
+}
+
+/// An aggregation evaluates its member rule at every related instance; the
+/// per-instance view keeps those values, keyed by rule and then entity id.
+#[test]
+fn instance_trace_surfaces_member_rule_values() {
+    let (program, dataset, queries) = member_household_case(&["household_income"]);
+    let response = explain(program, dataset, queries).expect("household query succeeds");
+    let result = &response.results[0];
+
+    let household =
+        serde_json::to_value(&result.outputs["household_income"]).expect("output serialises");
+    assert_eq!(household["value"]["value"], "150");
+    assert_eq!(instance_value(result, "person_income", "person-1"), "100");
+    assert_eq!(instance_value(result, "person_income", "person-2"), "50");
+    // The query instance itself is not repeated in the per-instance view.
+    assert!(!result.instance_trace.contains_key("household_income"));
+    assert!(result.trace.contains_key("household_income"));
+}
+
+/// A member rule requested at a household query does not fail the query:
+/// it is evaluated at each member instead, and its values are in the
+/// per-instance view, not in `outputs`.
+#[test]
+fn member_rule_requested_at_household_query_is_traced_per_instance() {
+    let (program, dataset, queries) = member_household_case(&["household_income", "person_income"]);
+    let response =
+        explain(program, dataset, queries).expect("household query with a member rule succeeds");
+    let result = &response.results[0];
+
+    let household =
+        serde_json::to_value(&result.outputs["household_income"]).expect("output serialises");
+    assert_eq!(household["value"]["value"], "150");
+    assert!(!result.outputs.contains_key("person_income"));
+    assert_eq!(instance_value(result, "person_income", "person-1"), "100");
+    assert_eq!(instance_value(result, "person_income", "person-2"), "50");
+}
+
+/// The per-instance view is omitted from the wire when it is empty, so a
+/// response without member work keeps its earlier shape.
+#[test]
+fn empty_instance_trace_is_not_serialised() {
+    let (program, mut dataset, mut queries) = member_household_case(&["person_income"]);
+    dataset.relations.clear();
+    queries[0].entity_id = "person-1".to_string();
+    let response = explain(program, dataset, queries).expect("person query succeeds");
+    let result = serde_json::to_value(&response.results[0]).expect("result serialises");
+    assert!(result.get("instance_trace").is_none(), "{result}");
+}
+
+/// A rule of the query id's own kind keeps its ordinary meaning: an input
+/// it needs and lacks still fails the request.
+#[test]
+fn missing_input_at_the_query_kind_still_fails() {
+    let (program, mut dataset, queries) = member_household_case(&["household_income"]);
+    dataset.inputs.retain(|input| input.entity_id != "person-2");
+    let error = explain(program, dataset, queries).expect_err("person-2 has no income");
+    assert!(
+        matches!(
+            &error,
+            ApiError::Eval(EvalError::MissingInput { entity_id, .. }) if entity_id == "person-2"
+        ),
+        "{error:?}"
+    );
+}
+
+/// A member without the facts its rule reads is left out of the
+/// per-instance view; the other members still answer.
+#[test]
+fn member_output_leaves_out_a_member_without_facts() {
+    let (program, mut dataset, queries) = member_household_case(&["person_income"]);
+    dataset.inputs.retain(|input| input.entity_id != "person-2");
+    let response = explain(program, dataset, queries).expect("household query succeeds");
+    let result = &response.results[0];
+    assert!(result.outputs.is_empty());
+    assert_eq!(instance_value(result, "person_income", "person-1"), "100");
+    assert!(!result.instance_trace["person_income"].contains_key("person-2"));
+}
+
+/// An id the dataset never names has no known kind, so a rule asked at it
+/// is evaluated there, as before.
+#[test]
+fn unknown_query_id_keeps_the_ordinary_meaning() {
+    let (program, dataset, mut queries) = member_household_case(&["person_income"]);
+    queries[0].entity_id = "household-9".to_string();
+    let error = explain(program, dataset, queries).expect_err("household-9 has no income");
+    assert!(
+        matches!(
+            &error,
+            ApiError::Eval(EvalError::MissingInput { entity_id, .. }) if entity_id == "household-9"
+        ),
+        "{error:?}"
+    );
+}
+
+/// Bulk answers outputs at the query's id only, so a fast request with a
+/// member output is answered in explain mode, with the same results.
+#[test]
+fn fast_mode_answers_member_outputs_in_explain_mode() {
+    let (program, dataset, queries) = member_household_case(&["household_income", "person_income"]);
+    let fast = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
+        mode: ExecutionMode::Fast,
+        program: program.clone(),
+        dataset: dataset.clone(),
+        queries: queries.clone(),
+    })
+    .expect("fast request falls back");
+    let explained = explain(program, dataset, queries).expect("explain request succeeds");
+
+    assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
+    let reason = fast.metadata.fallback_reason.as_deref().unwrap_or_default();
+    assert!(reason.contains("`person_income`"), "{reason}");
+    assert_eq!(
+        serde_json::to_value(&fast.results).expect("results serialise"),
+        serde_json::to_value(&explained.results).expect("results serialise")
+    );
+}
+
+/// A filtered entity (`SnapUnit`, a derived relation's `entity`) is queried
+/// with its source's ids, so a `SnapUnit` rule asked at a household is not a
+/// member output; a `Person` rule asked there is.
+#[test]
+fn filtered_entity_rule_is_not_a_member_output() {
+    let input = |name: &str| serde_json::json!({"kind": "input", "name": name});
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "member_of_household", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "snap_unit", "arity": 2, "derivation": {
+                "source_relation": "member_of_household",
+                "current_slot": 1, "related_slot": 0,
+                "entity": "SnapUnit", "slot_entities": ["Person", "Household"],
+                "predicate": {"kind": "comparison", "left": input("age"), "op": "gte",
+                              "right": {"kind": "literal", "value": {"kind": "integer", "value": 18}}}
+            }}
+        ],
+        "derived": [
+            {"name": "unit_size", "entity": "SnapUnit", "dtype": "integer", "unit": null,
+             "semantics": "scalar",
+             "expr": {"kind": "count_related", "relation": "snap_unit",
+                      "current_slot": 1, "related_slot": 0}},
+            {"name": "person_income", "entity": "Person", "dtype": "decimal", "unit": null,
+             "semantics": "scalar", "expr": input("income")},
+            {"name": "household_size", "entity": "Household", "dtype": "decimal", "unit": null,
+             "semantics": "scalar", "expr": input("size")}
+        ]
+    }))
+    .expect("program spec parses");
+    let (_, mut dataset, mut queries) = member_household_case(&[]);
+    let interval = dataset.inputs[0].interval.clone();
+    for (person, age) in [("person-1", 30), ("person-2", 10)] {
+        dataset.inputs.push(InputRecordSpec {
+            name: "age".to_string(),
+            entity: "Person".to_string(),
+            entity_id: person.to_string(),
+            interval: interval.clone(),
+            value: ScalarValueSpec::Integer { value: age },
+        });
+    }
+    queries[0].outputs = vec!["unit_size".to_string(), "person_income".to_string()];
+
+    let response = explain(program, dataset, queries).expect("household query succeeds");
+    let result = &response.results[0];
+    let size = serde_json::to_value(&result.outputs["unit_size"]).expect("output serialises");
+    assert_eq!(size["value"]["value"], 1);
+    assert!(!result.outputs.contains_key("person_income"));
+    assert_eq!(instance_value(result, "person_income", "person-1"), "100");
+    assert_eq!(instance_value(result, "person_income", "person-2"), "50");
+}
+
+/// Relation tuples never type a query's id, since binding checks them
+/// against the ids' evidence: with no record of its own, `household-1` has
+/// no known kind, so a `Person` rule asked there keeps its ordinary meaning,
+/// and strict binding refuses the tuples that contradict it, as before.
+#[test]
+fn query_id_typed_only_by_relation_tuples_keeps_the_ordinary_meaning() {
+    let (program, mut dataset, queries) = member_household_case(&["person_income"]);
+    dataset
+        .inputs
+        .retain(|input| input.entity_id != "household-1");
+    let error = explain(program, dataset, queries).expect_err("strict binding refuses");
+    assert!(error.to_string().contains("reorder the tuple"), "{error}");
+}
+
+/// A member output takes away no evidence binding uses, so a tuple in the
+/// wrong order is still refused under strict binding.
+#[test]
+fn wrong_order_tuple_is_still_refused_with_a_member_output() {
+    let (program, mut dataset, queries) = member_household_case(&["person_income"]);
+    dataset.relations[1].tuple.reverse();
+    let error = explain(program, dataset, queries).expect_err("strict binding refuses");
+    assert!(error.to_string().contains("reorder the tuple"), "{error}");
+}
+
+/// When no member answers, a member output keeps its ordinary meaning, so a
+/// request that cannot be answered still fails rather than succeeding with
+/// no value.
+#[test]
+fn member_output_with_no_member_answer_keeps_the_ordinary_meaning() {
+    let (program, mut dataset, queries) = member_household_case(&["person_income"]);
+    dataset
+        .inputs
+        .retain(|input| input.entity_id == "household-1");
+    let error = explain(program, dataset, queries).expect_err("no one has an income");
+    assert!(
+        matches!(
+            &error,
+            ApiError::Eval(EvalError::MissingInput { entity_id, .. }) if entity_id == "household-1"
+        ),
+        "{error:?}"
+    );
 }

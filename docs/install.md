@@ -128,6 +128,20 @@ that CLI too. Loading a format-3 artifact re-derives its metadata and
 interface and refuses one that differs, so a CLI from another release can
 write artifacts the extension won't load.
 
+To see which engine a deployment runs, ask the extension:
+
+```python
+import axiom_rules_engine_dense as dense
+
+dense.__version__     # the extension's version, the one in its wheel's name
+dense.ENGINE_VERSION  # the engine linked into it; equal in a release
+dense.engine_build()  # {"commit": "<40 hex digits>" or None, "dirty": bool or None}
+```
+
+`engine_build()` is the build identity that artifacts this engine compiles
+record as `engine_build`, and that the CLI's `capabilities` prints. `commit`
+is None when the build could not know it.
+
 ## Artifact provenance
 
 [Artifact releases](https://github.com/TheAxiomFoundation/axiom-rules-engine/releases)

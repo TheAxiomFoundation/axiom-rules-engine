@@ -334,7 +334,9 @@ build-provenance attestation. See
 The extension, the wrapper and the engine carry one version, and a version
 cut bumps `Cargo.toml`, `python-ext/Cargo.toml` (with `python-ext/Cargo.lock`)
 and `python/pyproject.toml` together; `python/tests/test_package_versions.py`
-fails when they differ.
+fails when they differ. At run time, `axiom_rules_engine_dense.__version__`,
+`ENGINE_VERSION` and `engine_build()` report the extension's version, the
+linked engine's version and the commit it was built from.
 
 ### Build on Linux and use the CI binaries
 
