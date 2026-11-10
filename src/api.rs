@@ -270,7 +270,14 @@ pub struct TraceParameterRead {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// What an indexed (table) parameter is keyed by, as it declares it.
+    /// Absent for a non-indexed parameter, whose `index` is always 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_by: Option<String>,
+    /// The key the rule's index expression evaluated to: the row of the
+    /// table that applied. 0 for a non-indexed parameter.
     pub index: i64,
+    /// The cell at `index` in the version in force at the period start.
     pub value: ScalarValueSpec,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
@@ -977,6 +984,7 @@ fn trace_node(
                 parameter: public_parameter_key(program, &read.parameter),
                 name: parameter.name.clone(),
                 id: parameter.id.clone(),
+                indexed_by: parameter.indexed_by.clone(),
                 index: read.index,
                 value: ScalarValueSpec::from_model(read.value.clone()),
                 unit: parameter.unit.clone(),

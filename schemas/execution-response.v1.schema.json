@@ -605,8 +605,16 @@
           ]
         },
         "index": {
+          "description": "The key the rule's index expression evaluated to: the row of the\ntable that applied. 0 for a non-indexed parameter.",
           "format": "int64",
           "type": "integer"
+        },
+        "indexed_by": {
+          "description": "What an indexed (table) parameter is keyed by, as it declares it.\nAbsent for a non-indexed parameter, whose `index` is always 0.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "name": {
           "type": "string"
@@ -634,7 +642,8 @@
           ]
         },
         "value": {
-          "$ref": "#/$defs/ScalarValueSpec"
+          "$ref": "#/$defs/ScalarValueSpec",
+          "description": "The cell at `index` in the version in force at the period start."
         }
       },
       "required": [
