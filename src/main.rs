@@ -156,32 +156,26 @@ fn recognize_top_level_command(name: &str) -> Option<TopLevelCommand> {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = env::args().skip(1).peekable();
+    let mut args = utf8_args()?.into_iter().peekable();
     if let Some(command_name) = args.next() {
         let Some(command) = recognize_top_level_command(&command_name) else {
             return Err(format!("unknown command `{command_name}`\n\n{}", top_usage()).into());
         };
         match command {
             TopLevelCommand::Version => {
-                if wants_help(&mut args) {
+                if wants_only_help(&mut args, "version")? {
                     println!("usage: axiom-rules-engine version\n\nPrint the engine version.");
                     return Ok(());
-                }
-                if args.next().is_some() {
-                    return Err("`version` takes no arguments".into());
                 }
                 println!("{}", version_line());
                 return Ok(());
             }
             TopLevelCommand::Capabilities => {
-                if wants_help(&mut args) {
+                if wants_only_help(&mut args, "capabilities")? {
                     println!(
                         "usage: axiom-rules-engine capabilities\n\nPrint, as JSON, the engine version and build and the artifact formats it reads."
                     );
                     return Ok(());
-                }
-                if args.next().is_some() {
-                    return Err("`capabilities` takes no arguments".into());
                 }
                 println!(
                     "{}",
@@ -286,9 +280,30 @@ fn run_request(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Whether the next argument asks for a command's help, consuming it if so.
-fn wants_help(args: &mut std::iter::Peekable<std::iter::Skip<env::Args>>) -> bool {
-    args.next_if(|arg| arg == "--help" || arg == "-h").is_some()
+/// For a command that takes no arguments: whether its arguments are a lone
+/// `--help` or `-h`. It refuses any other argument, before the flag or after
+/// it, rather than ignoring it.
+fn wants_only_help(
+    args: &mut std::iter::Peekable<std::vec::IntoIter<String>>,
+    command: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let help = args.next_if(|arg| arg == "--help" || arg == "-h").is_some();
+    if args.next().is_some() {
+        return Err(format!("`{command}` takes no arguments").into());
+    }
+    Ok(help)
+}
+
+/// The arguments after the program name. `env::args` panics on an argument
+/// that is not valid UTF-8; this refuses it with an error instead.
+fn utf8_args() -> Result<Vec<String>, String> {
+    env::args_os()
+        .skip(1)
+        .map(|arg| {
+            arg.into_string()
+                .map_err(|arg| format!("argument {arg:?} is not valid UTF-8"))
+        })
+        .collect()
 }
 
 fn version_line() -> String {
@@ -954,16 +969,16 @@ fn run_emit_schemas(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// `migrate scan <file-or-dir>...`: inventory hand-expanded exactly-one
-/// patterns across RuleSpec sources. Detection lowers each module through the
-/// real loader and walks the serialized spec (see `migrate`); files that do
-/// not lower standalone are reported as unscanned, never as pattern-free.
 fn migrate_usage() -> String {
     format!(
         "usage: migrate scan [--json] <file-or-dir>... | migrate apply [--json] [--write] <file-or-dir>... | {MIGRATE_ARTIFACT_USAGE}"
     )
 }
 
+/// `migrate scan <file-or-dir>...`: inventory hand-expanded exactly-one
+/// patterns across RuleSpec sources. Detection lowers each module through the
+/// real loader and walks the serialized spec (see `migrate`); files that do
+/// not lower standalone are reported as unscanned, never as pattern-free.
 fn run_migrate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let arg_count = args.len();
     let mut args = args.into_iter();
@@ -1113,12 +1128,6 @@ fn collect_yaml_files(
     Ok(())
 }
 
-/// `migrate apply [--json] [--write] <file-or-dir>...`: rewrite detected
-/// hand-expanded exactly-one sites to `exactly_one(...)`, gating every
-/// rewrite on engine-executed behavioral equivalence over all 2^n base
-/// assignments plus a rescan proving the pattern is gone. Dry-run by
-/// default; `--write` saves. Sites with non-fact bases are reported for
-/// hands and left untouched.
 const MIGRATE_ARTIFACT_USAGE: &str = "migrate artifact --artifact <compiled.json> [--output <typed.json>] [--relation-entities <relation>=<Kind>,<Kind>]... [--json]";
 
 /// `migrate artifact`: type the relations of a compiled artifact that the
@@ -1215,6 +1224,12 @@ fn run_migrate_artifact(args: Vec<String>) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+/// `migrate apply [--json] [--write] <file-or-dir>...`: rewrite detected
+/// hand-expanded exactly-one sites to `exactly_one(...)`, gating every
+/// rewrite on engine-executed behavioral equivalence over all 2^n base
+/// assignments plus a rescan proving the pattern is gone. Dry-run by
+/// default; `--write` saves. Sites with non-fact bases are reported for
+/// hands and left untouched.
 fn run_migrate_apply(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut json = false;
     let mut write = false;
