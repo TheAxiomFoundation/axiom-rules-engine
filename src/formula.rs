@@ -1204,6 +1204,9 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         // New Israeli Shekel: ISO 4217 exponent 2 (100 agorot = 1
         // shekel); Israeli statutes state amounts in shekels.
         ("ILS", UnitKindSpec::Currency { minor_units: 2 }),
+        // New Taiwan Dollar: ISO 4217 exponent 2 (100 cents = 1 dollar);
+        // Taiwan statutes state amounts in whole 新臺幣 (NT$) dollars.
+        ("TWD", UnitKindSpec::Currency { minor_units: 2 }),
         ("count", UnitKindSpec::Count),
         ("person", UnitKindSpec::Count),
         ("ratio", UnitKindSpec::Ratio),
