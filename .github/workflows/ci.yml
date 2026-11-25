@@ -122,6 +122,15 @@ jobs:
       - name: cargo build --release
         run: cargo build --release --verbose
 
+      # macos-latest images now ship Python 3.15, newer than PyO3's maximum
+      # (3.14 for pyo3 0.27), so pyo3-ffi's build script refuses it. Pin the
+      # interpreter the python-ext check sees to the version the
+      # python-ext-macos job already uses.
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.14"
+
       - name: cargo check (python-ext)
         run: cargo check --manifest-path python-ext/Cargo.toml --verbose
 
