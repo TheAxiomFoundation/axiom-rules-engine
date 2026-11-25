@@ -413,6 +413,42 @@ rules:
 }
 
 #[test]
+fn rulespec_lowers_new_taiwan_dollar_money_parameter() {
+    // New Taiwan Dollar (TWD, ISO 4217, 2 minor units) must be a seeded
+    // currency so rulespec-tw modules can declare `unit: TWD` without a repo
+    // inline unit declaration, exactly like ILS/DKK/AMD/ETB.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: New Taiwan dollar currency unit check
+rules:
+  - name: minimum_qualifying_investment_spend
+    kind: parameter
+    dtype: Money
+    unit: TWD
+    source: "Statute for Industrial Innovation Art. 10-1: 新臺幣一百萬元以上"
+    versions:
+      - effective_from: 2025-01-01
+        formula: "1000000"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("TWD RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    let twd = artifact
+        .program
+        .units
+        .iter()
+        .find(|u| u.name == "TWD")
+        .expect("TWD should be a seeded currency unit");
+    assert!(
+        matches!(twd.kind, UnitKindSpec::Currency { minor_units: 2 }),
+        "TWD must carry the ISO 4217 exponent 2: {:?}",
+        twd.kind
+    );
+}
+
+#[test]
 fn rulespec_lowers_swiss_franc_money_parameter() {
     let rulespec = r#"
 format: rulespec/v1

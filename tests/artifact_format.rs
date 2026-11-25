@@ -526,6 +526,23 @@ fn legacy(source: &str) -> Result<CompiledProgramArtifact, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Currency units seeded in `lower_module` after the format-2 fixtures were
+/// frozen. Every compiled program lists the seeded units, so a new seed
+/// changes every artifact's `units` array and nothing else; the frozen
+/// fixtures predate these entries. Name each one here, so any other change to
+/// `units` still fails the invariant.
+const SEEDED_UNITS_ADDED_AFTER_FREEZE: &[&str] = &["TWD"];
+
+fn remove_seeded_units_added_after_freeze(program: &mut Value) {
+    if let Some(units) = program.get_mut("units").and_then(Value::as_array_mut) {
+        units.retain(|unit| {
+            !unit["name"]
+                .as_str()
+                .is_some_and(|name| SEEDED_UNITS_ADDED_AFTER_FREEZE.contains(&name))
+        });
+    }
+}
+
 /// Invariant 1. For every in-repo RuleSpec fixture, the format-3 artifact's
 /// `program` without `interface`, and its `metadata`, equal (as JSON values)
 /// the format-2 artifact the unmodified engine compiled at 5d63e8f3.
@@ -540,6 +557,7 @@ fn executable_content_equals_what_format_2_compiled() {
             .expect("format 3 carries the interface");
         let expected: Value = serde_json::from_str(&frozen).unwrap();
         assert_eq!(expected["artifact_format_version"], json!(2), "{source}");
+        remove_seeded_units_added_after_freeze(&mut actual["program"]);
         assert_eq!(actual["program"], expected["program"], "{source}");
         assert_eq!(actual["metadata"], expected["metadata"], "{source}");
     }

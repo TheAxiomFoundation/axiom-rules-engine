@@ -1,8 +1,8 @@
 {
   "schema": "axiom/unit-aggregation-plan-stage3/1",
   "plan": "nz:incomeexplorer:family-aggregation-2026-27",
-  "plan_digest": "sha256:bbf3294fe2387037b7f201ed15e3f0e1ac9eb12f9b5d773580182eb79dac05f4",
-  "trace_root": "sha256:f4bf0aaba0e6d2db7f02bcc101569099d4149a5186f288dd29caafda62eb12e7",
+  "plan_digest": "sha256:a4cb03e68b6b1c6a8e2917b19be5a64f30d19fea38aa3cea971511080e21d5c6",
+  "trace_root": "sha256:5b824de52e99554c2be58aac18c3f253b315e1e5395b0d6e5c34c6b457c9c04a",
   "families": {
     "status": "determined",
     "value": [

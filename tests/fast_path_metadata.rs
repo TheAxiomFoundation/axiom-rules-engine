@@ -211,7 +211,12 @@ fn a_fresh_compile_drops_only_the_retired_blocker() {
             .is_some(),
         "a fresh compile carries the interface"
     );
-    let actual = as_format_2(&fresh);
+    let mut actual = as_format_2(&fresh);
+    // Seeds added after the fixture was frozen; see
+    // `SEEDED_UNITS_ADDED_AFTER_FREEZE` in tests/artifact_format.rs.
+    if let Some(units) = actual["program"]["units"].as_array_mut() {
+        units.retain(|unit| unit["name"] != "TWD");
+    }
     assert_eq!(actual, expected);
 
     // A fresh artifact loads with no stale diagnostic and round-trips exactly.
