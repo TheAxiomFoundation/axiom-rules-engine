@@ -23,40 +23,145 @@ COUNTRY_ROOT_RE = re.compile(r"^rulespec-(?P<country>[a-z]{2})$")
 JURISDICTION_RE = re.compile(r"^(?P<country>[a-z]{2})(?:-[a-z0-9]+)*$")
 CONCEPT_ID_RE = re.compile(
     r"^(?P<prefix>[a-z]{2}(?:-[a-z0-9]+)*):(?P<path>[A-Za-z0-9_.~/-]+)"
-    r"(?:#(?P<fragment>[A-Za-z0-9_.-]+))?$"
+    r"(?:#(?P<fragment>[A-Za-z0-9_./-]+))?$"
 )
 CORPUS_CITATION_PATH_RE = re.compile(
     r"^[a-z]{2,3}(?:-[a-z0-9]+)*/"
     r"[a-z][a-z0-9-]*"
     r"(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\-–]*[A-Za-z0-9.:\-–])?)+$"
 )
-IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# A name as the lexer reads one: an identifier, or a path of identifiers
+# joined by `/` with nothing between them (`Lexer::tokenise` in src/formula.rs).
+NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:/[A-Za-z_][A-Za-z0-9_]*)*")
 DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 NUMBER_RE = re.compile(r"[0-9][0-9_]*(?:\.[0-9][0-9_]*)?")
+# A number `serde_yaml` reads from a bare scalar and PyYAML leaves as text.
+YAML_EXPONENT_RE = re.compile(r"[-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)[eE][-+]?[0-9]+")
 STRING_RES = {
-    quote: re.compile(rf"{quote}(?:[^{quote}\\]|\\.)*{quote}?", re.DOTALL)
+    quote: re.compile(rf"{quote}(?:[^{quote}\\]|\\.)*(?P<close>{quote})?", re.DOTALL)
     for quote in "\"'"
 }
+# The lexer's two-character operators, each one token.
+OPERATORS = ("=>", "<=", ">=", "==", "!=", "->")
+# The words `keyword()` in src/formula.rs lexes as keywords, never as names.
 FORMULA_KEYWORDS = {
+    "False",
+    "True",
+    "amend",
     "and",
-    "as",
-    "case",
+    "elif",
     "else",
+    "entity",
     "false",
+    "from",
     "if",
-    "in",
-    "is",
-    "let",
     "match",
     "not",
     "or",
-    "then",
+    "to",
     "true",
 }
+BOOLEAN_KEYWORDS = {"False", "True", "false", "true"}
+COMPARISONS = ("<", ">", "<=", ">=", "==", "!=")
 PREDICATE_TERMS = {"anchor", "candidate"}
+# `lower_to_scalar` reads these names as the period's dates.
+PERIOD_BUILTINS = {"period_end", "period_start"}
+# The functions whose arguments `lower_to_scalar` takes as names (`expect_var`),
+# and the positions it reads as inputs. Their other names are relations, and
+# `input_for_year`'s year is a literal.
+NAMED_ARGUMENTS = {
+    "count_where": {1},
+    "input_for_year": {0},
+    "max_where": {1, 2},
+    "min_where": {1, 2},
+    "only_related": {1},
+    "sum_where": {1, 2},
+}
 # The bytes the formula lexer skips as whitespace (`u8::is_ascii_whitespace`).
 LEXER_WHITESPACE = " \t\n\x0c\r"
 STRING_TOKEN = '"'
+# `Lexer::tokenise` refuses an unclosed string, so the parser takes no such token.
+UNCLOSED_STRING_TOKEN = "'"
+
+
+@dataclass(frozen=True)
+class _Lit:
+    """`Expr::LitInt`, `LitFloat`, `LitStr` or `LitBool` in src/formula.rs."""
+
+
+@dataclass(frozen=True)
+class _Var:
+    name: str
+
+
+@dataclass(frozen=True)
+class _Op:
+    """`Expr::BinOp` or `UnaryOp`, or a chain of one `BinOp`. ``judgment`` says
+    whether the lowering reads the operands as judgments (`and`, `or`, `not`)
+    or as values."""
+
+    operands: list[_Expr]
+    judgment: bool
+
+
+@dataclass(frozen=True)
+class _Call:
+    function: str
+    arguments: list[_Expr]
+
+
+@dataclass(frozen=True)
+class _FieldAccess:
+    obj: _Expr
+    field: str
+
+
+@dataclass(frozen=True)
+class _Index:
+    target: _Expr
+    index: _Expr
+
+
+@dataclass(frozen=True)
+class _Cond:
+    branches: list[tuple[_Expr, _Expr]]
+    else_expr: _Expr
+
+
+@dataclass(frozen=True)
+class _Match:
+    subject: _Expr
+    cases: list[tuple[_Expr, _Expr]]
+    default: _Expr | None
+
+
+type _Expr = _Lit | _Var | _Op | _Call | _FieldAccess | _Index | _Cond | _Match
+
+
+class _FormulaRefused(Exception):
+    """`Parser` in src/formula.rs refuses the formula."""
+
+
+@dataclass(frozen=True)
+class _ParsedFormula:
+    tokens: list[str]
+    expr: _Expr | None
+    variables: set[str]
+
+
+@dataclass(frozen=True)
+class _FormulaScope:
+    """How the lowering reads a formula's names (`LowerCtx` in src/formula.rs).
+
+    ``relations`` and ``terms`` are empty outside a derived relation's
+    predicate. A bare relation name reads the relation only in a predicate's
+    judgment position, and an input anywhere else.
+    """
+
+    parameters: set[str]
+    derived: set[str]
+    relations: set[str]
+    terms: set[str]
 
 
 @dataclass(frozen=True)
@@ -413,15 +518,13 @@ def _concepts_from_rulespec_file(root: Path, path: Path) -> list[ConceptRecord]:
     concepts = [module_concept]
 
     rules = document.get("rules")
-    rule_names: set[str] = set()
     if isinstance(rules, list):
         for rule in rules:
             if not isinstance(rule, dict) or not isinstance(rule.get("name"), str):
                 continue
-            rule_names.add(rule["name"])
             concepts.append(_rule_concept(base_id, source_file, module_concept.citation, rule))
 
-    for input_name in sorted(_infer_input_names(rules, rule_names)):
+    for input_name in sorted(_infer_input_names(rules)):
         concepts.append(
             ConceptRecord(
                 concept_id=f"{base_id}#input.{input_name}",
@@ -472,51 +575,135 @@ def _rule_concept(
     )
 
 
-def _infer_input_names(
-    rules: Any,
-    rule_names: set[str],
-) -> set[str]:
+def _infer_input_names(rules: Any) -> set[str]:
+    """The inputs a module's formulas read, by the names the lowering gives
+    them (`lower_module` and `lower_judgment_formula` in src/formula.rs).
+
+    This module's own rules are all it knows, so a name only an imported module
+    declares counts as an input. A formula the parser refuses has no reads to
+    follow, so every undeclared name it does not call counts.
+    """
     if not isinstance(rules, list):
         return set()
-    inputs: set[str] = set()
-    for rule in rules:
-        if not isinstance(rule, dict):
-            continue
-        versions = rule.get("versions")
-        if not isinstance(versions, list):
-            continue
-        # In a derived relation's predicate, `anchor` and `candidate` name
-        # terms; elsewhere they are ordinary identifiers.
-        reserved = PREDICATE_TERMS if rule.get("kind") == "derived_relation" else set()
-        for version in versions:
-            if not isinstance(version, dict) or not isinstance(version.get("formula"), str):
-                continue
-            tokens = _formula_tokens(version["formula"])
-            for index, token in enumerate(tokens):
-                if (
-                    IDENTIFIER_RE.fullmatch(token)
-                    and token not in rule_names
-                    and token not in FORMULA_KEYWORDS
-                    and token not in reserved
-                    and not _is_called(tokens, index)
+    formulas = [
+        (rule, [_parse_formula(formula) for formula in _version_formulas(rule)])
+        for rule in rules
+        if isinstance(rule, dict)
+    ]
+    # The classes `parameter_classes` in src/rulespec.rs gives names. A source
+    # relation is a record no formula reads by name, so its name reads an input.
+    parameters: set[str] = set()
+    derived: set[str] = set()
+    relations: set[str] = set()
+    for rule, parsed in formulas:
+        match rule.get("kind"):
+            case "data_relation" | "derived_relation":
+                relations.add(rule.get("name"))
+            case "parameter" | "derived":
+                if _is_parameter_table(rule) or (
+                    not rule.get("entity")
+                    and all(isinstance(formula.expr, _Lit) for formula in parsed)
                 ):
-                    inputs.add(token)
+                    parameters.add(rule.get("name"))
+                else:
+                    derived.add(rule.get("name"))
+    declared = parameters | derived | relations
+
+    # Formulas lower only from these rules: a table lowers to its values, and
+    # only a derived relation has a predicate.
+    inputs: set[str] = set()
+    for rule, parsed in formulas:
+        match rule.get("kind"):
+            case "derived_relation":
+                for formula in parsed:
+                    scope = _FormulaScope(
+                        parameters,
+                        derived,
+                        relations,
+                        PREDICATE_TERMS | formula.variables,
+                    )
+                    inputs |= _formula_inputs(formula, scope, declared, judgment=True)
+            case "parameter" | "derived" if not _is_parameter_table(rule):
+                scope = _FormulaScope(parameters, derived, set(), set())
+                for formula in parsed:
+                    inputs |= _formula_inputs(formula, scope, declared)
     return inputs
+
+
+def _version_formulas(rule: dict[str, Any]) -> list[Any]:
+    """A rule's formulas, as `effective_versions` in src/rulespec.rs reads them."""
+    versions = rule.get("versions")
+    if isinstance(versions, list) and versions:
+        return [
+            version.get("formula") for version in versions if isinstance(version, dict)
+        ]
+    return [rule.get("formula")]
+
+
+def _is_parameter_table(rule: dict[str, Any]) -> bool:
+    """`is_parameter_table` in src/rulespec.rs."""
+    versions = rule.get("versions")
+    return isinstance(versions, list) and any(
+        isinstance(version, dict) and version.get("values") for version in versions
+    )
+
+
+def _parse_formula(formula: Any) -> _ParsedFormula:
+    # `deserialize_optional_string_like` in src/rulespec.rs reads a YAML number
+    # or boolean as its text.
+    if isinstance(formula, str) and YAML_EXPONENT_RE.fullmatch(formula):
+        formula = float(formula)
+    if isinstance(formula, float):
+        formula = format(formula, "f")
+    elif isinstance(formula, (bool, int)):
+        formula = str(formula)
+    tokens = _formula_tokens(formula) if isinstance(formula, str) else []
+    parser = _FormulaParser(tokens)
+    try:
+        expr = parser.parse_formula()
+    except (_FormulaRefused, RecursionError):
+        expr = None
+    return _ParsedFormula(tokens, expr, parser.variables)
+
+
+def _formula_inputs(
+    formula: _ParsedFormula,
+    scope: _FormulaScope,
+    declared: set[str],
+    judgment: bool = False,
+) -> set[str]:
+    inputs: set[str] = set()
+    if formula.expr is not None:
+        try:
+            _read_inputs(formula.expr, scope, inputs, judgment)
+            return inputs
+        except RecursionError:
+            pass
+    return {
+        token
+        for token, following in zip(formula.tokens, [*formula.tokens[1:], ""])
+        if following != "("
+        and _is_name(token)
+        and token not in declared
+        and token not in scope.terms
+    }
 
 
 def _formula_tokens(formula: str) -> list[str]:
     """Split a formula as `Lexer::tokenise` in src/formula.rs does, as far
-    as names and parentheses go.
+    as names, operators and parentheses go.
 
     `\"\"\"` blocks, `#` comments and whitespace yield no token, so the
-    words in them name nothing. A string literal yields `STRING_TOKEN`, a
-    name, date or number yields its text, and any other character is a token
-    of its own. Unlike the lexer, this keeps `a/b` as three tokens rather
-    than one path.
+    words in them name nothing. A string literal yields `STRING_TOKEN`; a
+    name (a path such as `a/b` included), date, number or two-character
+    operator yields its text; and any other character is a token of its own.
+    Whitespace of any kind around the formula yields none: src/rulespec.rs
+    trims it first.
     """
     tokens: list[str] = []
-    position = 0
-    while position < len(formula):
+    position = len(formula) - len(formula.lstrip())
+    end = len(formula.rstrip())
+    while position < end:
         character = formula[position]
         if formula.startswith('"""', position):
             close = formula.find('"""', position + 3)
@@ -527,38 +714,279 @@ def _formula_tokens(formula: str) -> list[str]:
         elif character in LEXER_WHITESPACE:
             position += 1
         elif character in STRING_RES:
-            position = STRING_RES[character].match(formula, position).end()
-            tokens.append(STRING_TOKEN)
+            match = STRING_RES[character].match(formula, position)
+            position = match.end()
+            tokens.append(STRING_TOKEN if match["close"] else UNCLOSED_STRING_TOKEN)
         else:
             match = (
-                IDENTIFIER_RE.match(formula, position)
+                NAME_RE.match(formula, position)
                 or DATE_RE.match(formula, position)
                 or NUMBER_RE.match(formula, position)
             )
-            token = match.group() if match else character
+            if match:
+                token = match.group()
+            elif formula.startswith(OPERATORS, position):
+                token = formula[position : position + 2]
+            else:
+                token = character
             tokens.append(token)
             position += len(token)
     return tokens
 
 
-def _is_called(tokens: list[str], index: int) -> bool:
-    """Whether the name at ``tokens[index]`` is a function being called.
+def _is_name(token: str) -> bool:
+    return NAME_RE.fullmatch(token) is not None and token not in FORMULA_KEYWORDS
 
-    The parser calls any name followed by ``(``, and a name wrapped in
-    grouping parentheses is still that name, so ``(len)(x)`` calls ``len``
-    (`parse_primary` and `parse_postfix` in src/formula.rs). The same name
-    anywhere else reads a value, whatever it is called.
-    """
-    closing = index + 1
-    while closing < len(tokens) and tokens[closing] == ")":
-        closing += 1
-    depth = closing - index - 1
+
+def _is_identifier(token: str) -> bool:
+    """Whether the lexer reads ``token`` as `TokType::Ident`, not a path."""
+    return _is_name(token) and "/" not in token
+
+
+def _is_literal(token: str) -> bool:
     return (
-        closing < len(tokens)
-        and tokens[closing] == "("
-        and depth <= index
-        and all(token == "(" for token in tokens[index - depth : index])
+        token == STRING_TOKEN
+        or token in BOOLEAN_KEYWORDS
+        or NUMBER_RE.fullmatch(token) is not None
     )
+
+
+class _FormulaParser:
+    """`Parser::parse_expr` in src/formula.rs, over `_formula_tokens`.
+
+    Each method accepts what the Rust method of its name accepts. Chains of
+    one operator and of `elif` stay flat here, so a formula nests only as far
+    as its parentheses, `else: if` and `match` arms do.
+    """
+
+    def __init__(self, tokens: list[str]) -> None:
+        self.tokens = tokens
+        self.position = 0
+        # What `reserved_variable_names` collects: every name an `exists`
+        # generator could bind, wherever the `exists` sits.
+        self.variables: set[str] = set()
+
+    def peek(self, offset: int = 0) -> str:
+        index = self.position + offset
+        return self.tokens[index] if index < len(self.tokens) else ""
+
+    def take(self, *tokens: str) -> bool:
+        if self.peek() in tokens:
+            self.position += 1
+            return True
+        return False
+
+    def expect(self, token: str) -> None:
+        if not self.take(token):
+            raise _FormulaRefused
+
+    def parse_formula(self) -> _Expr:
+        expr = self.parse_expr()
+        if self.position < len(self.tokens):
+            raise _FormulaRefused
+        return expr
+
+    def parse_expr(self) -> _Expr:
+        if self.peek() == "match":
+            return self.parse_match()
+        if self.peek() == "if":
+            return self.parse_cond()
+        return self.parse_or()
+
+    def parse_match(self) -> _Expr:
+        self.expect("match")
+        subject = self.parse_or()
+        self.expect(":")
+        cases: list[tuple[_Expr, _Expr]] = []
+        default = None
+        while self.peek(1) == "=>" and (
+            _is_identifier(self.peek()) or _is_literal(self.peek())
+        ):
+            if default is not None:
+                raise _FormulaRefused
+            pattern = self.parse_primary()
+            self.expect("=>")
+            result = self.parse_expr()
+            if isinstance(pattern, _Var) and pattern.name == "_":
+                default = result
+            else:
+                cases.append((pattern, result))
+        return _Match(subject, cases, default)
+
+    def parse_cond(self) -> _Expr:
+        self.expect("if")
+        branches = [self.parse_branch()]
+        while self.take("elif"):
+            branches.append(self.parse_branch())
+        self.expect("else")
+        self.expect(":")
+        return _Cond(branches, self.parse_expr())
+
+    def parse_branch(self) -> tuple[_Expr, _Expr]:
+        condition = self.parse_or()
+        self.expect(":")
+        return condition, self.parse_expr()
+
+    def parse_or(self) -> _Expr:
+        operands = [self.parse_and()]
+        while self.take("or"):
+            operands.append(self.parse_and())
+        return operands[0] if len(operands) == 1 else _Op(operands, True)
+
+    def parse_and(self) -> _Expr:
+        operands = [self.parse_cmp()]
+        while self.take("and"):
+            operands.append(self.parse_cmp())
+        return operands[0] if len(operands) == 1 else _Op(operands, True)
+
+    def parse_cmp(self) -> _Expr:
+        left = self.parse_add()
+        if self.take(*COMPARISONS):
+            return _Op([left, self.parse_add()], False)
+        return left
+
+    def parse_add(self) -> _Expr:
+        operands = [self.parse_mul()]
+        while self.take("+", "-"):
+            operands.append(self.parse_mul())
+        return operands[0] if len(operands) == 1 else _Op(operands, False)
+
+    def parse_mul(self) -> _Expr:
+        operands = [self.parse_unary()]
+        while self.take("*", "/"):
+            operands.append(self.parse_unary())
+        return operands[0] if len(operands) == 1 else _Op(operands, False)
+
+    def parse_unary(self) -> _Expr:
+        if self.take("-"):
+            return _Op([self.parse_unary()], False)
+        if self.take("not"):
+            return _Op([self.parse_unary()], True)
+        return self.parse_postfix()
+
+    def parse_postfix(self) -> _Expr:
+        expr = self.parse_primary()
+        while True:
+            if self.take("("):
+                if not isinstance(expr, _Var):
+                    raise _FormulaRefused
+                expr = self.parse_call(expr.name)
+            elif self.take("."):
+                field = self.peek()
+                if not _is_identifier(field):
+                    raise _FormulaRefused
+                self.position += 1
+                expr = _FieldAccess(expr, field)
+            elif self.take("["):
+                index = self.parse_expr()
+                self.expect("]")
+                expr = _Index(expr, index)
+            else:
+                return expr
+
+    def parse_call(self, function: str) -> _Expr:
+        arguments: list[_Expr] = []
+        if not self.take(")"):
+            arguments.append(self.parse_expr())
+            while self.take(","):
+                arguments.append(self.parse_expr())
+            self.expect(")")
+        if function == "exists" and arguments and isinstance(arguments[0], _Call):
+            self.variables.update(
+                argument.name
+                for argument in arguments[0].arguments
+                if isinstance(argument, _Var)
+            )
+        return _Call(function, arguments)
+
+    def parse_primary(self) -> _Expr:
+        token = self.peek()
+        if _is_literal(token):
+            self.position += 1
+            return _Lit()
+        if _is_name(token):
+            self.position += 1
+            return _Var(token)
+        self.expect("(")
+        expr = self.parse_expr()
+        self.expect(")")
+        return expr
+
+
+def _read_inputs(
+    expr: _Expr, scope: _FormulaScope, inputs: set[str], judgment: bool = False
+) -> None:
+    """Add to ``inputs`` the inputs lowering ``expr`` reads (`lower_to_scalar`,
+    or `lower_to_judgment` when ``judgment``, in src/formula.rs).
+
+    A shape the lowering refuses, such as ``ceil(x, y)``, reads what it names.
+    """
+    match expr:
+        case _Var(name):
+            if not (
+                name in PERIOD_BUILTINS
+                or name in scope.parameters
+                or name in scope.derived
+                or name in scope.terms
+                or (judgment and name in scope.relations)
+            ):
+                inputs.add(name)
+        case _FieldAccess(obj, field):
+            # `relation.field`, or a read through a predicate's term.
+            if not isinstance(obj, _Var):
+                _read_inputs(obj, scope, inputs)
+            _read_by_name(field, scope, inputs)
+        case _Index(target, index):
+            # A name indexed with `[` is a parameter table.
+            if not isinstance(target, _Var):
+                _read_inputs(target, scope, inputs)
+            _read_inputs(index, scope, inputs)
+        case _Op(operands, is_judgment):
+            for operand in operands:
+                _read_inputs(operand, scope, inputs, is_judgment)
+        case _Call(function, arguments):
+            _read_call(function, arguments, scope, inputs)
+        case _Cond(branches, else_expr):
+            for condition, then_expr in branches:
+                _read_inputs(condition, scope, inputs, True)
+                _read_inputs(then_expr, scope, inputs)
+            _read_inputs(else_expr, scope, inputs)
+        case _Match(subject, cases, default):
+            # A `match` with only a wildcard arm lowers to that arm, so nothing
+            # reads its subject.
+            if cases or default is None:
+                _read_inputs(subject, scope, inputs)
+            for pattern, result in cases:
+                _read_inputs(pattern, scope, inputs)
+                _read_inputs(result, scope, inputs)
+            if default is not None:
+                _read_inputs(default, scope, inputs)
+
+
+def _read_call(
+    function: str, arguments: list[_Expr], scope: _FormulaScope, inputs: set[str]
+) -> None:
+    # `len` reads only the relation of its first argument, and `sum` lowers
+    # only its first argument.
+    if function == "len":
+        return
+    if function == "sum":
+        arguments = arguments[:1]
+    judgment = function in ("exactly_one", "exists")
+    named = NAMED_ARGUMENTS.get(function)
+    for position, argument in enumerate(arguments):
+        if named is None or not isinstance(argument, _Var):
+            _read_inputs(argument, scope, inputs, judgment)
+        elif position in named:
+            _read_by_name(argument.name, scope, inputs)
+
+
+def _read_by_name(name: str, scope: _FormulaScope, inputs: set[str]) -> None:
+    """Read ``name`` as `related_value_ref` and `related_predicate` do: the
+    derived rule of that name, or else the input, whatever else has the name.
+    """
+    if name not in scope.derived and name not in scope.terms:
+        inputs.add(name)
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:
@@ -744,7 +1172,13 @@ def _has_executable_formula(rule: dict[str, Any]) -> bool:
 
 def _is_canonical_import(target: str) -> bool:
     match = CONCEPT_ID_RE.fullmatch(target)
-    if match is None or any(character.isspace() for character in target):
+    # `resolve_import_target` in src/rulespec.rs takes one `#fragment`, with no
+    # `/` in it, though a concept ID's fragment may hold one.
+    if (
+        match is None
+        or "/" in (match["fragment"] or "")
+        or any(character.isspace() for character in target)
+    ):
         return False
     parts = match.group("path").split("/")
     terminal = parts[-1].lower()
